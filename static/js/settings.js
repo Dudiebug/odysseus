@@ -2115,6 +2115,7 @@ function initAll() {
   initEmailSettings();
   initEmailAccountsSettings();
   initReminderSettings();
+  initCodexAuth();
   initUnifiedIntegrations();
 }
 
@@ -3021,6 +3022,98 @@ const INTG_TYPES = {
 };
 
 let _unifiedInited = false;
+let _codexAuthInited = false;
+
+function initCodexAuth() {
+  if (_codexAuthInited) return;
+  _codexAuthInited = true;
+  const statusEl = el('codex-auth-status');
+  const deviceEl = el('codex-auth-device');
+  const urlEl = el('codex-auth-url');
+  const codeEl = el('codex-auth-code');
+  const startBtn = el('codex-auth-start');
+  const testBtn = el('codex-auth-test');
+  const cancelBtn = el('codex-auth-cancel');
+  const logoutBtn = el('codex-auth-logout');
+  if (!statusEl || !startBtn) return;
+
+  let pollTimer = null;
+
+  function setBusy(btn, busy) {
+    if (!btn) return;
+    btn.disabled = !!busy;
+    btn.style.opacity = busy ? '0.45' : '';
+  }
+
+  function render(data) {
+    const st = data.status || 'unknown';
+    let text = data.message || st;
+    if (data.authenticated && data.auth_mode) text = `${text} (${data.auth_mode})`;
+    if (st === 'pending') text = 'Waiting for browser verification...';
+    if (st === 'starting') text = 'Starting device-code login...';
+    statusEl.textContent = text;
+    statusEl.style.color = (st === 'failed' || st === 'timeout' || st === 'missing_cli' || st === 'disabled') ? 'var(--red)' : '';
+
+    const hasDevice = !!(data.verification_url && data.user_code && (st === 'pending' || st === 'starting'));
+    deviceEl?.classList.toggle('hidden', !hasDevice);
+    if (hasDevice) {
+      urlEl.textContent = data.verification_url;
+      urlEl.href = data.verification_url;
+      codeEl.textContent = data.user_code;
+    } else if (codeEl) {
+      codeEl.textContent = '';
+    }
+
+    const running = st === 'starting' || st === 'pending' || data.process_running;
+    cancelBtn?.classList.toggle('hidden', !running);
+    startBtn.textContent = data.authenticated ? 'Sign in again' : 'Sign in with Codex';
+    setBusy(startBtn, running);
+    setBusy(testBtn, running);
+    setBusy(logoutBtn, running);
+  }
+
+  async function request(path, method) {
+    const res = await fetch(`/api/codex-auth/${path}`, { method: method || 'GET', credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({ status: 'failed', message: `HTTP ${res.status}` }));
+    render(data);
+    return data;
+  }
+
+  async function refresh() {
+    try {
+      const data = await request('status');
+      const running = data.status === 'starting' || data.status === 'pending' || data.process_running;
+      if (running && !pollTimer) pollTimer = setInterval(refresh, 2500);
+      if (!running && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    } catch (e) {
+      statusEl.textContent = 'Failed to check Codex status';
+      statusEl.style.color = 'var(--red)';
+    }
+  }
+
+  startBtn.addEventListener('click', async () => {
+    await request('start', 'POST');
+    if (!pollTimer) pollTimer = setInterval(refresh, 2500);
+  });
+  testBtn?.addEventListener('click', async () => {
+    const data = await request('test', 'POST');
+    if (data.ok) {
+      statusEl.textContent = 'Codex connection is available';
+      statusEl.style.color = 'var(--green,#50fa7b)';
+    }
+  });
+  cancelBtn?.addEventListener('click', async () => {
+    await request('cancel', 'POST');
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  });
+  logoutBtn?.addEventListener('click', async () => {
+    if (!await window.styledConfirm('Logout from Codex on this Odysseus host?', { confirmText: 'Logout', danger: true })) return;
+    await request('logout', 'POST');
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  });
+
+  refresh();
+}
 
 async function initUnifiedIntegrations() {
   if (_unifiedInited) return;
