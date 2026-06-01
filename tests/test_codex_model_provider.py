@@ -65,6 +65,10 @@ class _FakeAdapter:
             "tool_execution_allowed": False,
         }
 
+    async def stream_chat(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+        yield {"type": "delta", "delta": "mock stream"}
+        yield {"type": "done", "message": "mock stream", "model": model or CODEX_EXPERIMENTAL_MODEL_ID}
+
 
 def _provider(payload):
     svc = _FakeService(payload)
@@ -80,6 +84,11 @@ Options:
 Commands:
   resume
 """
+
+CODEX_0135_EXEC_HELP_WITH_SKIP = CODEX_0135_EXEC_HELP.replace(
+    "  --json\n",
+    "  --json\n  --skip-git-repo-check\n",
+)
 
 CODEX_0135_ROOT_HELP = """Usage: codex [OPTIONS] <COMMAND>
 
@@ -104,6 +113,45 @@ async def _codex_help_runner(args, timeout, cwd=None, env=None, exec_help=CODEX_
     if args[1:] == ["exec", "resume", "--help"]:
         return 0, CODEX_0135_RESUME_HELP, ""
     return 0, "codex provider test ok", ""
+
+
+async def _collect(agen):
+    out = []
+    async for event in agen:
+        out.append(event)
+    return out
+
+
+class _FakeStdout:
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    async def readline(self):
+        if not self._lines:
+            return b""
+        return self._lines.pop(0)
+
+
+class _FakeStderr:
+    def __init__(self, payload=b""):
+        self._payload = payload
+
+    async def read(self):
+        return self._payload
+
+
+class _FakeProcess:
+    def __init__(self, stdout_lines, stderr=b"", returncode=0):
+        self.stdout = _FakeStdout(stdout_lines)
+        self.stderr = _FakeStderr(stderr)
+        self.returncode = returncode
+        self.killed = False
+
+    async def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
 
 
 def test_codex_model_provider_hidden_when_flag_disabled(monkeypatch):
@@ -237,6 +285,27 @@ def test_codex_model_provider_test_chat_route_is_admin_gated(monkeypatch):
         raise AssertionError("non-admin request should fail")
 
 
+def test_codex_model_provider_test_chat_stream_route_is_admin_gated(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
+    router = setup_codex_model_provider_routes(provider)
+    test_chat_stream = _endpoint(router, "/api/codex-model-provider/test-chat-stream", "POST")
+
+    body = SimpleNamespace(prompt="hello", messages=None, model=None, timeout_seconds=None)
+    response = run(test_chat_stream(_request(user="admin"), body))
+    chunks = run(_collect(response.body_iterator))
+    payload = "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+    assert '"type":"delta"' in payload or '"type": "delta"' in payload
+    assert "mock stream" in payload
+
+    try:
+        run(test_chat_stream(_request(user="bob"), body))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    else:
+        raise AssertionError("non-admin request should fail")
+
+
 def test_codex_model_provider_test_chat_requires_body(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
     provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
@@ -272,7 +341,7 @@ def test_adapter_success_from_mocked_subprocess(monkeypatch):
 
     assert out["ok"] is True
     assert out["message"] == "codex provider test ok"
-    assert out["streaming_supported"] is False
+    assert out["streaming_supported"] is True
     assert out["session_resume_supported"] is False
     assert out["tool_execution_allowed"] is False
     exec_args = calls[-1][0]
@@ -321,6 +390,71 @@ def test_adapter_accepts_current_cli_without_approval_flag(monkeypatch):
     assert any("Approval-control flag is not available" in item for item in out["limitations"])
 
 
+def test_adapter_uses_skip_git_repo_check_when_advertised(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        return await _codex_help_runner(
+            args,
+            timeout,
+            cwd=cwd,
+            env=env,
+            exec_help=CODEX_0135_EXEC_HELP_WITH_SKIP,
+        )
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "Say ok"}]))
+
+    assert out["ok"] is True
+    assert out["cli_capabilities"]["skip_git_repo_check_supported"] is True
+    assert out["cli_capabilities"]["skip_git_repo_check_flag"] == "--skip-git-repo-check"
+    exec_args = calls[-1]
+    assert exec_args[:4] == ["/usr/bin/codex", "exec", "--sandbox", "read-only"]
+    assert "--skip-git-repo-check" in exec_args
+    assert "--json" not in exec_args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in exec_args
+    assert "--yolo" not in exec_args
+
+
+def test_adapter_retries_with_skip_git_repo_check_when_trust_error_requires_it(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_0135_EXEC_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        if "--skip-git-repo-check" not in args:
+            return 2, "", "not inside a trusted directory; retry with --skip-git-repo-check"
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "Say ok"}]))
+
+    assert out["ok"] is True
+    exec_calls = [args for args in calls if args[1] == "exec" and "--help" not in args and args[2] != "resume"]
+    assert "--skip-git-repo-check" not in exec_calls[0]
+    assert "--skip-git-repo-check" in exec_calls[1]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in exec_calls[1]
+    assert "--yolo" not in exec_calls[1]
+
+
 def test_status_available_with_current_cli_help(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
     svc = _FakeService({
@@ -336,9 +470,111 @@ def test_status_available_with_current_cli_help(monkeypatch):
 
     assert out["status"] == "available"
     assert out["chat_supported"] is True
+    assert out["streaming_supported"] is True
     assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
+    assert out["models"][0]["streaming_supported"] is True
     assert out["cli_capabilities"]["sandbox_supported"] is True
     assert out["cli_capabilities"]["approval_control_supported"] is False
+    assert out["cli_capabilities"]["json_output_supported"] is True
+    assert out["cli_capabilities"]["streaming_supported"] is True
+    assert out["cli_capabilities"]["skip_git_repo_check_supported"] is False
+    assert out["cli_capabilities"]["sandbox_mode"] == "read-only"
+
+
+def test_adapter_streams_json_events_with_safe_args(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    created = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        return await _codex_help_runner(
+            args,
+            timeout,
+            cwd=cwd,
+            env=env,
+            exec_help=CODEX_0135_EXEC_HELP_WITH_SKIP,
+        )
+
+    async def fake_create_subprocess_exec(*args, stdout=None, stderr=None, cwd=None, env=None):
+        created.append({"args": list(args), "cwd": cwd, "env": env})
+        return _FakeProcess([
+            b'{"type":"response.output_text.delta","delta":"hello "}\n',
+            b'{"type":"delta","data":{"text":"world"}}\n',
+            b'{"usage":{"input_tokens":1,"output_tokens":2}}\n',
+        ])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    events = run(_collect(adapter.stream_chat([{"role": "user", "content": "Say ok"}], timeout_seconds=5)))
+
+    assert [event["type"] for event in events] == ["delta", "delta", "metrics", "done"]
+    assert events[0]["delta"] == "hello "
+    assert events[1]["delta"] == "world"
+    assert events[2]["data"]["input_tokens"] == 1
+    assert events[-1]["message"] == "hello world"
+    exec_args = created[0]["args"]
+    assert exec_args[:4] == ["/usr/bin/codex", "exec", "--sandbox", "read-only"]
+    assert "--skip-git-repo-check" in exec_args
+    assert "--json" in exec_args
+    assert "--dangerously-bypass-approvals-and-sandbox" not in exec_args
+    assert "--yolo" not in exec_args
+
+
+def test_adapter_stream_falls_back_to_completed_stdout_when_no_deltas(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        return await _codex_help_runner(args, timeout, cwd=cwd, env=env)
+
+    async def fake_create_subprocess_exec(*args, stdout=None, stderr=None, cwd=None, env=None):
+        return _FakeProcess([b"plain completed response\n"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    events = run(_collect(adapter.stream_chat([{"role": "user", "content": "Say ok"}], timeout_seconds=5)))
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "plain completed response"
+    assert events[1]["message"] == "plain completed response"
+
+
+def test_adapter_stream_reports_not_supported_without_json(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[1:] == ["exec", "--help"]:
+            return 0, "Usage: codex exec --sandbox <MODE>", ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    available = run(adapter.available())
+    events = run(_collect(adapter.stream_chat([{"role": "user", "content": "Say ok"}], timeout_seconds=5)))
+
+    assert available["streaming_supported"] is False
+    assert available["cli_capabilities"]["json_output_supported"] is False
+    assert events[0]["type"] == "error"
+    assert events[0]["status"] == "streaming_not_supported"
 
 
 def test_adapter_handles_timeout(monkeypatch):

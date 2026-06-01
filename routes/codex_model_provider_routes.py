@@ -1,6 +1,9 @@
 """Admin-gated experimental Codex model-provider routes."""
 
+import json
+
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Any
 
@@ -43,5 +46,28 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
             timeout_seconds=body.timeout_seconds or 120,
             odysseus_session_id=getattr(body, "odysseus_session_id", None),
         )
+
+    @router.post("/test-chat-stream")
+    async def test_chat_stream(request: Request, body: CodexTestChatRequest):
+        require_admin(request)
+        messages = body.messages or []
+        if not messages and body.prompt:
+            messages = [{"role": "user", "content": body.prompt}]
+        if not messages:
+            async def invalid_request():
+                yield 'data: {"type":"error","status":"invalid_request","error":"Provide either prompt or messages"}\n\n'
+
+            return StreamingResponse(invalid_request(), media_type="text/event-stream")
+
+        async def event_stream():
+            async for event in provider.stream_chat(
+                messages,
+                model=body.model,
+                timeout_seconds=body.timeout_seconds or 120,
+                odysseus_session_id=getattr(body, "odysseus_session_id", None),
+            ):
+                yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return router

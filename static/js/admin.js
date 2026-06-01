@@ -804,7 +804,10 @@ function initEndpointForm() {
     codexStatusEl.className = available ? 'admin-badge' : 'admin-badge admin-badge-off';
     codexStatusEl.style.color = available ? 'var(--green,#50fa7b)' : '';
 
-    let details = 'Experimental, non-streaming, stateless. Uses Codex CLI auth. Not added to the default model picker yet.';
+    const streaming = data?.streaming_supported === true;
+    let details = streaming
+      ? 'Experimental. Test Chat remains one-shot; JSON event streaming is only available through the experimental SSE test route. Stateless. Uses Codex CLI auth. Not added to the default model picker yet.'
+      : 'Experimental, one-shot only, stateless. Uses Codex CLI auth. Not added to the default model picker yet.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Sign in with Codex / ChatGPT before running the provider test.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
