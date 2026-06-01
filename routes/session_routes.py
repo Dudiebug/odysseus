@@ -171,13 +171,24 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         endpoint_id: str = Form(""),
     ):
         skip_val = str(skip_validation).lower() == "true"
+        try:
+            from src.codex_model_provider import (
+                CODEX_EXPERIMENTAL_MODEL_ID,
+                is_codex_virtual_endpoint,
+            )
+            is_codex_session = is_codex_virtual_endpoint(endpoint_url, model)
+        except Exception:
+            CODEX_EXPERIMENTAL_MODEL_ID = "codex-cli/chatgpt-experimental"
+            is_codex_session = False
 
         if not endpoint_url and not skip_val:
             raise HTTPException(400, "endpoint_url is required (choose from /api/models)")
 
-        model_to_use = model
+        model_to_use = CODEX_EXPERIMENTAL_MODEL_ID if is_codex_session else model
 
-        if skip_val:
+        if is_codex_session:
+            pass
+        elif skip_val:
             # skip_validation = trust the caller and do NOT probe /v1/models.
             # Used for custom endpoints AND for bare placeholder sessions with no
             # model at all (e.g. an email reply draft just needs a session to live

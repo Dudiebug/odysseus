@@ -36,11 +36,22 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import message_needs_tools as _message_needs_tools
+from src.codex_model_provider import CodexModelProvider, is_codex_virtual_endpoint
 
 logger = logging.getLogger(__name__)
 
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
+
+
+async def _run_codex_chat(messages: list[dict[str, Any]], session_id: str, model: str) -> dict[str, Any]:
+    provider = CodexModelProvider()
+    return await provider.test_chat(
+        messages,
+        model=model,
+        timeout_seconds=120,
+        odysseus_session_id=session_id,
+    )
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -72,6 +83,8 @@ def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
 def _clear_orphaned_session_endpoint(sess) -> bool:
     """Clear a session model if its endpoint was deleted from ModelEndpoint."""
     if not getattr(sess, "endpoint_url", ""):
+        return False
+    if is_codex_virtual_endpoint(getattr(sess, "endpoint_url", ""), getattr(sess, "model", "")):
         return False
     db = SessionLocal()
     try:
@@ -167,6 +180,30 @@ def setup_chat_routes(
                 )
             except Exception as e:
                 logger.error(f"Research failed: {e}")
+
+        if is_codex_virtual_endpoint(sess.endpoint_url, sess.model):
+            result = await _run_codex_chat(ctx.messages, session, sess.model)
+            if not result.get("ok"):
+                return {"response": result.get("error") or "Codex / ChatGPT is unavailable."}
+            reply = result.get("message") or ""
+            _clean_reply, _clean_md = clean_thinking_for_save(reply, {
+                "model": sess.model,
+                "streaming_supported": False,
+                "session_resume_supported": bool(result.get("session_resume_supported")),
+                "session_resumed": bool(result.get("session_resumed")),
+            })
+            sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
+
+            from core.database import update_session_last_accessed
+            update_session_last_accessed(session)
+            session_manager.save_sessions()
+            run_post_response_tasks(
+                sess, session_manager, session, message, reply, None,
+                ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                character_name=ctx.preset.character_name,
+                owner=ctx.user,
+            )
+            return {"response": reply}
 
         reply = await llm_call_async(
             sess.endpoint_url,
@@ -630,6 +667,58 @@ def setup_chat_routes(
             if ctx.preset.character_name:
                 _model_info["character_name"] = ctx.preset.character_name
             yield f'data: {json.dumps(_model_info)}\n\n'
+
+            if is_codex_virtual_endpoint(sess.endpoint_url, sess.model):
+                _chat_start = time.time()
+                result = await _run_codex_chat(messages, session, sess.model)
+                if not result.get("ok"):
+                    msg = result.get("error") or "Codex / ChatGPT is unavailable."
+                    yield f"event: error\ndata: {json.dumps({'error': msg, 'status': 502})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    _stream_set(session, status="done")
+                    _active_streams.pop(session, None)
+                    return
+
+                full_response = result.get("message") or ""
+                if full_response:
+                    yield f"data: {json.dumps({'delta': full_response})}\n\n"
+                elapsed = max(time.time() - _chat_start, 0.001)
+                last_metrics = {
+                    "response_time": round(elapsed, 2),
+                    "input_tokens": estimate_tokens(messages),
+                    "output_tokens": len(full_response) // 4,
+                    "tokens_per_second": round((len(full_response) // 4) / elapsed, 2),
+                    "model": sess.model,
+                    "usage_source": "estimated",
+                    "streaming_supported": False,
+                    "session_resume_supported": bool(result.get("session_resume_supported")),
+                    "session_resumed": bool(result.get("session_resumed")),
+                }
+                yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                if full_response and not incognito:
+                    _saved_id = save_assistant_response(
+                        sess, session_manager, session, full_response, last_metrics,
+                        character_name=ctx.preset.character_name,
+                        web_sources=web_sources,
+                        rag_sources=ctx.rag_sources,
+                        research_sources=research_sources,
+                        used_memories=ctx.used_memories,
+                        do_research=do_research,
+                        incognito=incognito,
+                    )
+                    if _saved_id:
+                        yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                    run_post_response_tasks(
+                        sess, session_manager, session, message, full_response,
+                        last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                        incognito=incognito, compare_mode=compare_mode,
+                        character_name=ctx.preset.character_name,
+                        owner=_user,
+                    )
+                _stream_set(session, status="done")
+                yield "data: [DONE]\n\n"
+                _active_streams.pop(session, None)
+                return
 
             # Detect image models and route directly to image generation
             _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")

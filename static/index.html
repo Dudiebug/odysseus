@@ -2043,6 +2043,7 @@
                   <option value="https://api.anthropic.com" data-logo="anthropic">Anthropic</option>
                   <option value="https://api.deepseek.com/v1" data-logo="deepseek" selected>DeepSeek</option>
                   <option value="https://api.openai.com/v1" data-logo="openai">OpenAI</option>
+                  <option value="codex-cli" data-logo="openai" data-experimental="true">Codex / ChatGPT (experimental)</option>
                   <option value="https://openrouter.ai/api/v1" data-logo="openrouter">OpenRouter</option>
                   <option value="https://ollama.com/api" data-logo="ollama">Ollama Cloud</option>
                   <option value="https://api.groq.com/openai/v1" data-logo="groq">Groq</option>
@@ -2053,7 +2054,29 @@
                   <option value="https://api.x.ai/v1" data-logo="grok">xAI Grok</option>
                   <option value="https://api.z.ai/api/paas/v4" data-logo="zhipu">Z.AI (Zhipu)</option>
                 </select>
-                <div class="admin-model-form-row">
+                <div id="adm-codexProviderPanel" class="adm-codex-provider-panel hidden">
+                  <div style="display:flex;align-items:flex-start;gap:10px;">
+                    <div style="flex:1;min-width:0;">
+                      <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span>Codex / ChatGPT</span>
+                        <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
+                      </div>
+                      <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
+                        Uses the Codex CLI sign-in you manage in Settings -> Integrations. Runs non-streaming test chats with a read-only sandbox.
+                      </div>
+                    </div>
+                    <span id="adm-codexProviderStatus" class="admin-badge admin-badge-off" style="white-space:nowrap;">Checking</span>
+                  </div>
+                  <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexResetBtn" style="opacity:0.75;">Reset Codex session</button>
+                  </div>
+                  <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
+                </div>
+                <div class="admin-model-form-row" id="adm-epApiNormalRow">
                   <input id="adm-epApiKey" type="password" placeholder="API key">
                   <select id="adm-epType" style="padding:5px;width:80px;">
                     <option value="llm">LLM</option>
@@ -2064,27 +2087,6 @@
                   <button class="admin-btn-add" id="adm-epAddBtn" style="width:55px;text-align:center;">Add</button>
                 </div>
                 <div id="adm-epApiMsg" class="adm-ep-inline-msg"></div>
-                <div id="adm-codexProviderCard" class="admin-user-row" style="display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-top:10px;">
-                  <div style="display:flex;align-items:flex-start;gap:10px;">
-                    <div style="flex:1;min-width:0;">
-                      <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                        <span>Codex / ChatGPT</span>
-                        <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
-                      </div>
-                      <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
-                        Experimental, non-streaming, stateless provider using Codex CLI auth. Not added to the default model picker yet.
-                      </div>
-                    </div>
-                    <span id="adm-codexProviderStatus" class="admin-badge admin-badge-off" style="white-space:nowrap;">Checking</span>
-                  </div>
-                  <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                    <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
-                    <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
-                    <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
-                  </div>
-                  <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
-                </div>
               </div>
             </div>
           </div>

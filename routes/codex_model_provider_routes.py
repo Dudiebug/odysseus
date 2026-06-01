@@ -13,6 +13,11 @@ class CodexTestChatRequest(BaseModel):
     messages: list[dict[str, Any]] | None = None
     model: str | None = None
     timeout_seconds: int | None = None
+    session_id: str | None = None
+
+
+class CodexResetSessionRequest(BaseModel):
+    session_id: str | None = None
 
 
 def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None) -> APIRouter:
@@ -40,6 +45,12 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
             messages,
             model=body.model,
             timeout_seconds=body.timeout_seconds or 120,
+            odysseus_session_id=getattr(body, "session_id", None),
         )
+
+    @router.post("/reset-session")
+    async def reset_session(request: Request, body: CodexResetSessionRequest):
+        require_admin(request)
+        return provider.reset_session(body.session_id)
 
     return router

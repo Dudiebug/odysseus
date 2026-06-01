@@ -3,6 +3,7 @@
 import re
 import uuid
 import json
+import asyncio
 import time as _time
 import logging
 import httpx
@@ -582,6 +583,33 @@ def setup_model_routes(model_discovery):
                     "model_type": ep_model_type,
                     "offline": True,
                 })
+
+        try:
+            from src.codex_model_provider import (
+                CODEX_EXPERIMENTAL_MODEL_DISPLAY,
+                CODEX_EXPERIMENTAL_MODEL_ID,
+                CODEX_VIRTUAL_ENDPOINT_URL,
+                CodexModelProvider,
+            )
+            codex_status = asyncio.run(CodexModelProvider().status())
+            if codex_status.get("status") == "available" and codex_status.get("chat_supported"):
+                items.append({
+                    "host": "codex",
+                    "port": 0,
+                    "url": CODEX_VIRTUAL_ENDPOINT_URL,
+                    "models": [CODEX_EXPERIMENTAL_MODEL_ID],
+                    "models_display": [CODEX_EXPERIMENTAL_MODEL_DISPLAY],
+                    "models_extra": [],
+                    "models_extra_display": [],
+                    "endpoint_id": "",
+                    "endpoint_name": "Codex / ChatGPT",
+                    "category": "api",
+                    "model_type": "llm",
+                    "virtual": True,
+                    "experimental": True,
+                })
+        except Exception:
+            pass
 
         return {"hosts": [], "items": items}
 
