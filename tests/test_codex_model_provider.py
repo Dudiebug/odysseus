@@ -21,6 +21,34 @@ from src.codex_model_provider import (
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
 
 
+CODEX_0135_EXEC_HELP = """
+Usage: codex exec [OPTIONS] [PROMPT] [COMMAND]
+
+Commands:
+  resume  Resume a previous exec session
+
+Options:
+  -s, --sandbox <SANDBOX_MODE>
+          Sandbox mode to use when executing commands
+          [possible values: read-only, workspace-write, danger-full-access]
+      --json
+          Emit events as JSONL
+  -h, --help
+          Print help
+"""
+
+
+CODEX_0135_RESUME_HELP = """
+Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+
+Options:
+      --last
+          Resume the most recent session in the current working directory
+  -h, --help
+          Print help
+"""
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -237,20 +265,95 @@ def test_adapter_success_from_mocked_subprocess(monkeypatch):
 
     adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
     out = run(adapter.complete([{"role": "user", "content": "Say ok"}]))
+    exec_call = next(call for call in calls if call[0][-1] != "--help")
 
     assert out["ok"] is True
     assert out["message"] == "codex provider test ok"
     assert out["streaming_supported"] is False
     assert out["session_resume_supported"] is False
     assert out["tool_execution_allowed"] is False
-    assert calls[2][1]
-    assert "--sandbox" in calls[2][0]
-    assert "read-only" in calls[2][0]
-    assert "--ask-for-approval" in calls[2][0]
-    assert "never" in calls[2][0]
-    assert "--yolo" not in calls[2][0]
-    assert "--dangerously-bypass-approvals-and-sandbox" not in calls[2][0]
-    assert CODEX_EXPERIMENTAL_MODEL_ID not in calls[2][0]
+    assert exec_call[1]
+    assert "--sandbox" in exec_call[0]
+    assert "read-only" in exec_call[0]
+    assert "--ask-for-approval" in exec_call[0]
+    assert "never" in exec_call[0]
+    assert "--yolo" not in exec_call[0]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in exec_call[0]
+    assert CODEX_EXPERIMENTAL_MODEL_ID not in exec_call[0]
+
+
+def test_adapter_supports_0135_style_sandbox_without_approval_flag(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    exec_calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args == ["/usr/bin/codex", "exec", "--help"]:
+            return 0, CODEX_0135_EXEC_HELP, ""
+        if args == ["/usr/bin/codex", "--help"]:
+            return 0, "Usage: codex [OPTIONS] [COMMAND]", ""
+        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
+            return 0, CODEX_0135_RESUME_HELP, ""
+        exec_calls.append(args)
+        return 0, "codex direct ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    available = run(adapter.available())
+    out = run(adapter.complete([{"role": "user", "content": "Reply exactly: codex direct ok"}]))
+
+    assert available["ok"] is True
+    assert available["status"] == "available"
+    assert available["approval_control_supported"] is False
+    assert available["capabilities"]["sandbox_flag"] == "--sandbox"
+    assert available["capabilities"]["session_resume_supported"] is True
+    assert "approval-control flag" in " ".join(available["limitations"])
+    assert out["ok"] is True
+    assert out["message"] == "codex direct ok"
+    assert exec_calls
+    assert exec_calls[0][0:2] == ["/usr/bin/codex", "exec"]
+    assert "--sandbox" in exec_calls[0]
+    assert "read-only" in exec_calls[0]
+    assert "--ask-for-approval" not in exec_calls[0]
+    assert "--approval-policy" not in exec_calls[0]
+    assert "--approval" not in exec_calls[0]
+    assert "--yolo" not in exec_calls[0]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in exec_calls[0]
+    assert CODEX_EXPERIMENTAL_MODEL_ID not in exec_calls[0]
+
+
+def test_status_available_with_0135_style_sandbox_without_approval_flag(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args == ["/usr/bin/codex", "exec", "--help"]:
+            return 0, CODEX_0135_EXEC_HELP, ""
+        if args == ["/usr/bin/codex", "--help"]:
+            return 0, "Usage: codex [OPTIONS] [COMMAND]", ""
+        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
+            return 0, CODEX_0135_RESUME_HELP, ""
+        return 0, "ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    provider = CodexModelProvider(lambda: svc, chat_adapter=adapter)
+    out = run(provider.status())
+
+    assert out["status"] == "available"
+    assert out["chat_supported"] is True
+    assert out["approval_control_supported"] is False
+    assert out["capabilities"]["sandbox_supported"] is True
+    assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
+    assert "approval-control flag" in " ".join(out["limitations"])
 
 
 def test_codex_virtual_endpoint_detection():
@@ -306,8 +409,18 @@ def test_adapter_refuses_unsafe_cli_help(monkeypatch):
 
     assert out["ok"] is False
     assert out["status"] == "unsupported_unsafe_cli_mode"
-    assert "--sandbox" in out["missing_flags"]
-    assert "--ask-for-approval" in out["missing_flags"]
+    assert "--sandbox/-s" in out["missing_flags"]
+
+
+def test_adapter_blocks_forbidden_cli_flags():
+    adapter = CodexCliChatAdapter()
+    for flag in ("--yolo", "--dangerously-bypass-approvals-and-sandbox"):
+        try:
+            adapter._assert_safe_args(["/usr/bin/codex", "exec", "--sandbox", "read-only", flag, "prompt"])
+        except ValueError as exc:
+            assert "Unsafe Codex CLI flag blocked" in str(exc)
+        else:
+            raise AssertionError(f"{flag} should be blocked")
 
 
 def test_adapter_detects_safety_flags_from_top_level_help(monkeypatch):
@@ -376,6 +489,8 @@ def test_same_odysseus_session_resumes_codex_session(monkeypatch, tmp_path):
     async def runner(args, timeout, cwd=None, env=None):
         if args == ["/usr/bin/codex", "exec", "--help"]:
             return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
+        if args == ["/usr/bin/codex", "--help"]:
+            return 0, "Usage: codex [OPTIONS] [COMMAND]", ""
         if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
             return 0, "Usage: codex exec resume <SESSION_ID>", ""
         exec_calls.append((args, cwd))
@@ -407,6 +522,8 @@ def test_different_odysseus_sessions_do_not_share_codex_mapping(monkeypatch, tmp
     async def runner(args, timeout, cwd=None, env=None):
         if args == ["/usr/bin/codex", "exec", "--help"]:
             return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
+        if args == ["/usr/bin/codex", "--help"]:
+            return 0, "Usage: codex [OPTIONS] [COMMAND]", ""
         if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
             return 0, "Usage: codex exec resume <SESSION_ID>", ""
         exec_calls.append(args)
@@ -430,6 +547,8 @@ def test_reset_clears_only_selected_codex_session_mapping(monkeypatch, tmp_path)
     async def runner(args, timeout, cwd=None, env=None):
         if args == ["/usr/bin/codex", "exec", "--help"]:
             return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
+        if args == ["/usr/bin/codex", "--help"]:
+            return 0, "Usage: codex [OPTIONS] [COMMAND]", ""
         if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
             return 0, "Usage: codex exec resume <SESSION_ID>", ""
         exec_calls.append(args)

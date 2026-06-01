@@ -846,7 +846,7 @@ function initEndpointForm() {
     else if (available) details += ' Session resume is not available with this Codex CLI, so follow-ups fall back safely.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Sign in with Codex / ChatGPT before running the provider test.';
-    else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
+    else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI exposes read-only sandbox support.';
     else if (status === 'cli_unavailable') details += ' Install or expose the Codex CLI in this runtime before testing.';
     codexDetailsEl.textContent = details;
 
@@ -892,7 +892,7 @@ function initEndpointForm() {
     if (status === 'disabled') return 'Codex provider test is disabled. Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true.';
     if (status === 'sign_in_required') return 'Sign-in required before Codex provider test chat can run.';
     if (status === 'cli_unavailable') return 'Codex CLI is unavailable in this runtime.';
-    if (status === 'unsupported_unsafe_cli_mode') return 'Safety blocked: this Codex CLI does not expose the required sandbox/approval flags for UI test chat.';
+    if (status === 'unsupported_unsafe_cli_mode') return 'Safety blocked: this Codex CLI does not expose read-only sandbox support for UI test chat.';
     if (status === 'timeout') return 'Codex CLI test timed out.';
     if (status === 'empty_response') return 'Codex CLI returned no assistant message.';
     if (status === 'cli_failed') return 'Codex CLI test failed. No raw CLI output is shown in the UI.';

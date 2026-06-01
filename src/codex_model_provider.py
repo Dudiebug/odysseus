@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,7 +35,7 @@ _LIMITATIONS = [
     "Non-streaming: returns one completed assistant message.",
     "Session resume depends on the installed Codex CLI.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
-    "The adapter requires Codex CLI sandbox/approval flags before running.",
+    "The adapter requires Codex CLI read-only sandbox support before running.",
 ]
 
 _UNSAFE_FLAGS = (
@@ -64,12 +65,63 @@ def is_codex_virtual_endpoint(endpoint_url: str | None, model: str | None = None
     )
 
 
+@dataclass(frozen=True)
+class CodexCliCapabilities:
+    sandbox_flag: str = ""
+    sandbox_read_only_supported: bool = False
+    sandbox_modes_visible: bool = False
+    approval_flag: str = ""
+    approval_never_value: str = "never"
+    supports_json: bool = False
+    supports_model: bool = False
+    session_resume_supported: bool = False
+    resume_last_supported: bool = False
+    resume_session_id_supported: bool = False
+
+    @property
+    def sandbox_supported(self) -> bool:
+        return bool(self.sandbox_flag)
+
+    @property
+    def approval_control_supported(self) -> bool:
+        return bool(self.approval_flag)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sandbox_supported": self.sandbox_supported,
+            "sandbox_flag": self.sandbox_flag,
+            "sandbox_read_only_supported": self.sandbox_read_only_supported,
+            "sandbox_modes_visible": self.sandbox_modes_visible,
+            "approval_control_supported": self.approval_control_supported,
+            "approval_flag": self.approval_flag,
+            "supports_json": self.supports_json,
+            "supports_model": self.supports_model,
+            "session_resume_supported": self.session_resume_supported,
+            "resume_last_supported": self.resume_last_supported,
+            "resume_session_id_supported": self.resume_session_id_supported,
+        }
+
+
+def _limitations_for_capabilities(capabilities: CodexCliCapabilities | dict[str, Any] | None = None) -> list[str]:
+    limitations = list(_LIMITATIONS)
+    approval_supported = False
+    if isinstance(capabilities, CodexCliCapabilities):
+        approval_supported = capabilities.approval_control_supported
+    elif isinstance(capabilities, dict):
+        approval_supported = bool(capabilities.get("approval_control_supported"))
+    if capabilities is not None and not approval_supported:
+        limitations.append(
+            "This Codex CLI does not expose an approval-control flag; Odysseus relies on read-only sandbox mode."
+        )
+    return limitations
+
+
 class CodexCliChatAdapter:
     """Admin-only, non-streaming adapter boundary for `codex exec`.
 
     This intentionally does not provide a normal chat-provider hook yet. It
-    refuses to run unless the installed CLI advertises the sandbox and approval
-    flags needed for a constrained one-shot completion probe.
+    refuses to run unless the installed CLI advertises read-only sandbox support
+    for a constrained one-shot completion probe.
     """
 
     def __init__(
@@ -88,18 +140,22 @@ class CodexCliChatAdapter:
         preflight = await self._preflight()
         if not preflight.get("ok"):
             return preflight
-        help_result = await self._exec_help(preflight["bin_path"], preflight["env"])
-        if not help_result.get("ok"):
-            return help_result
+        capabilities_result = await self._detect_cli_capabilities(preflight["bin_path"], preflight["env"])
+        if not capabilities_result.get("ok"):
+            return capabilities_result
+        capabilities = capabilities_result["capabilities"]
         return {
             "ok": True,
             "status": "available",
             "chat_supported": True,
             "streaming_supported": False,
-            "session_resume_supported": bool(help_result.get("session_resume_supported", False)),
+            "session_resume_supported": capabilities.session_resume_supported,
             "tool_execution_allowed": False,
-            "supports_json": help_result.get("supports_json", False),
-            "limitations": list(_LIMITATIONS),
+            "supports_json": capabilities.supports_json,
+            "supports_model": capabilities.supports_model,
+            "approval_control_supported": capabilities.approval_control_supported,
+            "capabilities": capabilities.as_dict(),
+            "limitations": _limitations_for_capabilities(capabilities),
         }
 
     async def complete(
@@ -128,7 +184,7 @@ class CodexCliChatAdapter:
             preflight["bin_path"],
             prompt,
             odysseus_session_key=session_key,
-            resume_supported=resume_supported,
+            capabilities=availability.get("capabilities") or {},
         )
         workdir = self._ensure_workdir_for_session(session_key)
         rc, out, err = await self._run(
@@ -163,7 +219,7 @@ class CodexCliChatAdapter:
             "message": message,
             "duration_ms": duration_ms,
             "model": model or CODEX_EXPERIMENTAL_MODEL_ID,
-            "limitations": list(_LIMITATIONS),
+            "limitations": _limitations_for_capabilities(availability.get("capabilities")),
             "streaming_supported": False,
             "session_resume_supported": resume_supported,
             "session_resumed": resume_mode != "new",
@@ -216,42 +272,106 @@ class CodexCliChatAdapter:
 
         return {"ok": True, "status": "preflight_ok", "bin_path": bin_path, "env": env}
 
-    async def _exec_help(self, bin_path: str, env: dict[str, str]) -> dict[str, Any]:
+    async def _detect_cli_capabilities(self, bin_path: str, env: dict[str, str]) -> dict[str, Any]:
         rc, out, err = await self._run([bin_path, "exec", "--help"], timeout=20, env=env)
-        top_rc, top_out, top_err = 1, "", ""
-        if rc != 0 or "--sandbox" not in (out or "") or "--ask-for-approval" not in (out or ""):
-            top_rc, top_out, top_err = await self._run([bin_path, "--help"], timeout=20, env=env)
-        help_text = "\n".join([out or "", top_out or ""])
+        top_rc, top_out, top_err = await self._run([bin_path, "--help"], timeout=20, env=env)
         if rc != 0 and top_rc != 0:
             return {
                 "ok": False,
                 "status": "unsupported_unsafe_cli_mode",
-                "error": "Unable to inspect codex exec safety flags",
+                "error": "Unable to inspect Codex CLI safety capabilities",
                 "detail": _sanitize_text(err or out or top_err or top_out, limit=500),
             }
-        missing = [flag for flag in ("--sandbox", "--ask-for-approval") if flag not in help_text]
-        if missing:
+        help_text = "\n".join([out or "", err or "", top_out or "", top_err or ""])
+        resume = await self._detect_resume_support(bin_path, env, help_text)
+        capabilities = self._parse_cli_capabilities(help_text, resume)
+        if not capabilities.sandbox_supported or not capabilities.sandbox_read_only_supported:
+            missing = []
+            if not capabilities.sandbox_supported:
+                missing.append("--sandbox/-s")
+            if capabilities.sandbox_supported and not capabilities.sandbox_read_only_supported:
+                missing.append("read-only sandbox mode")
             return {
                 "ok": False,
                 "status": "unsupported_unsafe_cli_mode",
-                "error": "Codex CLI does not advertise required safety flags",
+                "error": "Codex CLI does not advertise required read-only sandbox support",
                 "missing_flags": missing,
+                "capabilities": capabilities.as_dict(),
             }
-        resume_supported = await self._detect_resume_support(bin_path, env, help_text)
         return {
             "ok": True,
-            "status": "exec_help_ok",
-            "supports_json": "--json" in help_text,
-            "supports_model": "--model" in help_text or " -m" in help_text,
-            "session_resume_supported": resume_supported,
+            "status": "capabilities_ok",
+            "capabilities": capabilities,
         }
 
-    async def _detect_resume_support(self, bin_path: str, env: dict[str, str], help_text: str) -> bool:
+    async def _detect_resume_support(self, bin_path: str, env: dict[str, str], help_text: str) -> dict[str, bool]:
         rc, out, err = await self._run([bin_path, "exec", "resume", "--help"], timeout=20, env=env)
         text = "\n".join([help_text or "", out or "", err or ""]).lower()
-        if rc == 0 and "resume" in text:
-            return True
-        return bool(re.search(r"\bresume\b", text) and "exec" in text)
+        resume_supported = bool((rc == 0 and "resume" in text) or (re.search(r"\bresume\b", text) and "exec" in text))
+        resume_last_supported = bool(re.search(r"(?<!\w)--last\b", text))
+        resume_session_id_supported = bool(
+            re.search(r"<\s*(session|conversation)[_-]?id\s*>", text, re.IGNORECASE)
+            or re.search(r"\[\s*(session|conversation)[_-]?id\s*\]", text, re.IGNORECASE)
+            or re.search(r"\b(session|conversation)[_-]?id\b", text, re.IGNORECASE)
+        )
+        return {
+            "session_resume_supported": resume_supported and (resume_last_supported or resume_session_id_supported),
+            "resume_last_supported": resume_last_supported,
+            "resume_session_id_supported": resume_session_id_supported,
+        }
+
+    @staticmethod
+    def _parse_cli_capabilities(help_text: str, resume: dict[str, bool]) -> CodexCliCapabilities:
+        text = help_text or ""
+        lower = text.lower()
+        sandbox_flag = ""
+        if "--sandbox" in text:
+            sandbox_flag = "--sandbox"
+        elif re.search(r"(^|[\s,])-s([,\s]|$)", text):
+            sandbox_flag = "-s"
+
+        sandbox_modes_visible = bool(
+            "read-only" in lower
+            or "read only" in lower
+            or "workspace-write" in lower
+            or "danger-full-access" in lower
+            or "sandbox_mode" in lower
+        )
+        sandbox_read_only_supported = bool(sandbox_flag and ("read-only" in lower or "read only" in lower))
+        if sandbox_flag and not sandbox_modes_visible:
+            # Older/current help can show only "--sandbox <SANDBOX_MODE>". The
+            # CLI will reject an unknown mode, so keeping read-only here is a
+            # fail-closed probe while still supporting terse help output.
+            sandbox_read_only_supported = True
+
+        approval_flag = ""
+        approval_candidates = (
+            "--ask-for-approval",
+            "--approval-policy",
+            "--approval",
+            "--approval-mode",
+            "--approval_policy",
+        )
+        for candidate in approval_candidates:
+            if candidate in text:
+                approval_flag = candidate
+                break
+        if not approval_flag:
+            match = re.search(r"--[A-Za-z0-9][A-Za-z0-9_-]*approval[A-Za-z0-9_-]*", text)
+            if match and match.group(0) not in _UNSAFE_FLAGS:
+                approval_flag = match.group(0)
+
+        return CodexCliCapabilities(
+            sandbox_flag=sandbox_flag,
+            sandbox_read_only_supported=sandbox_read_only_supported,
+            sandbox_modes_visible=sandbox_modes_visible,
+            approval_flag=approval_flag,
+            supports_json=bool("--json" in text or "--output-format" in text),
+            supports_model=bool("--model" in text or re.search(r"(^|[\s,])-m([,\s]|$)", text)),
+            session_resume_supported=bool(resume.get("session_resume_supported")),
+            resume_last_supported=bool(resume.get("resume_last_supported")),
+            resume_session_id_supported=bool(resume.get("resume_session_id_supported")),
+        )
 
     def _build_exec_args(
         self,
@@ -259,26 +379,52 @@ class CodexCliChatAdapter:
         prompt: str,
         *,
         odysseus_session_key: str,
-        resume_supported: bool,
+        capabilities: CodexCliCapabilities | dict[str, Any],
     ) -> tuple[list[str], str]:
-        safety = ["--sandbox", "read-only", "--ask-for-approval", "never"]
+        caps = self._coerce_capabilities(capabilities)
+        safety = self._safety_args(caps)
         args = [bin_path, "exec"]
         resume_mode = "new"
-        if resume_supported and odysseus_session_key:
+        if caps.session_resume_supported and odysseus_session_key:
             mapped = self._session_map.get(odysseus_session_key) or {}
             codex_session_id = str(mapped.get("codex_session_id") or "").strip()
-            if codex_session_id:
+            if codex_session_id and caps.resume_session_id_supported:
                 args.extend(["resume", codex_session_id])
                 resume_mode = "session_id"
             else:
                 mapped_workdir_raw = str(mapped.get("workdir") or "")
                 can_resume_last = bool(mapped_workdir_raw and Path(mapped_workdir_raw).exists())
-                if can_resume_last:
+                if can_resume_last and caps.resume_last_supported:
                     args.extend(["resume", "--last"])
                     resume_mode = "last_in_workdir"
         args.extend([*safety, prompt])
         self._assert_safe_args(args)
         return args, resume_mode
+
+    @staticmethod
+    def _coerce_capabilities(capabilities: CodexCliCapabilities | dict[str, Any]) -> CodexCliCapabilities:
+        if isinstance(capabilities, CodexCliCapabilities):
+            return capabilities
+        return CodexCliCapabilities(
+            sandbox_flag=str(capabilities.get("sandbox_flag") or ""),
+            sandbox_read_only_supported=bool(capabilities.get("sandbox_read_only_supported")),
+            sandbox_modes_visible=bool(capabilities.get("sandbox_modes_visible")),
+            approval_flag=str(capabilities.get("approval_flag") or ""),
+            supports_json=bool(capabilities.get("supports_json")),
+            supports_model=bool(capabilities.get("supports_model")),
+            session_resume_supported=bool(capabilities.get("session_resume_supported")),
+            resume_last_supported=bool(capabilities.get("resume_last_supported")),
+            resume_session_id_supported=bool(capabilities.get("resume_session_id_supported")),
+        )
+
+    @staticmethod
+    def _safety_args(capabilities: CodexCliCapabilities) -> list[str]:
+        if not capabilities.sandbox_supported or not capabilities.sandbox_read_only_supported:
+            raise ValueError("Codex provider requires read-only sandbox support")
+        args = [capabilities.sandbox_flag, "read-only"]
+        if capabilities.approval_control_supported:
+            args.extend([capabilities.approval_flag, capabilities.approval_never_value])
+        return args
 
     def _assert_safe_args(self, args: list[str]) -> None:
         if "exec" not in args:
@@ -286,10 +432,8 @@ class CodexCliChatAdapter:
         for unsafe in _UNSAFE_FLAGS:
             if unsafe in args:
                 raise ValueError("Unsafe Codex CLI flag blocked")
-        if "--sandbox" not in args or "read-only" not in args:
+        if ("--sandbox" not in args and "-s" not in args) or "read-only" not in args:
             raise ValueError("Codex provider requires read-only sandbox")
-        if "--ask-for-approval" not in args or "never" not in args:
-            raise ValueError("Codex provider requires approvals disabled")
         if CODEX_EXPERIMENTAL_MODEL_ID in args:
             raise ValueError("Internal Codex model id must not be passed to Codex CLI")
 
@@ -482,13 +626,22 @@ class CodexModelProvider:
 
         models = []
         chat_available = {"ok": False}
+        availability_details: dict[str, Any] = {}
         if status == "available":
             chat_available = await self._chat_adapter.available()
             if not chat_available.get("ok"):
                 status = chat_available.get("status") or "unsupported_unsafe_cli_mode"
+                for key in ("error", "missing_flags", "capabilities"):
+                    if key in chat_available:
+                        availability_details[key] = chat_available[key]
             else:
                 base["chat_supported"] = True
                 base["session_resume_supported"] = bool(chat_available.get("session_resume_supported", False))
+                base["limitations"] = chat_available.get("limitations") or base["limitations"]
+                availability_details["capabilities"] = chat_available.get("capabilities", {})
+                availability_details["approval_control_supported"] = bool(
+                    chat_available.get("approval_control_supported", False)
+                )
                 models.append({
                     "id": CODEX_EXPERIMENTAL_MODEL_ID,
                     "display": CODEX_EXPERIMENTAL_MODEL_DISPLAY,
@@ -510,6 +663,7 @@ class CodexModelProvider:
                 "codex_home": auth.get("codex_home", ""),
             },
             "models": models,
+            **availability_details,
         }
 
     async def test_chat(
