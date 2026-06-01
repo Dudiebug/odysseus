@@ -168,7 +168,7 @@ class CodexAuthService:
         if "not logged in" in lower:
             return False, "", "Not logged in"
         if clean:
-            return False, "", clean[:300]
+            return False, "", "Codex login status returned an unrecognized response"
         return False, "", "Unable to determine Codex login status"
 
     async def _run_command(self, args: list[str], timeout: float = 15.0) -> tuple[int, str]:
@@ -320,7 +320,7 @@ class CodexAuthService:
                 if "device code login is not enabled" in line.lower():
                     last_safe_line = "Device-code login is not enabled for this Codex account or server"
                 elif "error" in line.lower():
-                    last_safe_line = line[:300]
+                    last_safe_line = "Codex CLI reported an error during device-code login"
                 found_url = URL_RE.search(line)
                 if found_url and any(host in found_url.group(0).lower() for host in ("openai.com", "chatgpt.com")):
                     url = found_url.group(0)
@@ -409,10 +409,10 @@ class CodexAuthService:
         rc, out = await self._run_command(["logout"], timeout=20)
         clean = ANSI_RE.sub("", out or "").strip()
         if rc == 0:
-            state = CodexAuthState(status="logged_out", message=clean or "Codex credentials removed")
+            state = CodexAuthState(status="logged_out", message="Codex credentials removed")
         else:
             log.warning("Codex logout failed with rc=%s", rc)
-            state = CodexAuthState(status="failed", message=(clean or "Codex logout failed")[:300], error_code="logout_failed")
+            state = CodexAuthState(status="failed", message="Codex logout failed", error_code="logout_failed")
         async with self._lock:
             self._state = state
         return {**self._base_capabilities(), **state.public()}

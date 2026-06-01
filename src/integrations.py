@@ -189,7 +189,6 @@ def add_integration(data: Dict[str, Any]) -> Dict[str, Any]:
     integration.setdefault("api_key", "")
     integration.setdefault("name", "")
     integration.setdefault("base_url", "")
-    integration.setdefault("integration_type", "api")
 
     integrations = load_integrations()
     integrations.append(integration)
@@ -259,9 +258,6 @@ async def execute_api_call(
     integration = _find_integration(integration_id)
     if not integration:
         return {"error": f"Integration not found: {integration_id}", "exit_code": 1}
-
-    if integration.get("integration_type") == "codex":
-        return {"error": "Codex / ChatGPT is not an HTTP API integration", "exit_code": 1}
 
     if not integration.get("enabled", True):
         return {"error": f"Integration '{integration.get('name')}' is disabled", "exit_code": 1}
@@ -385,10 +381,7 @@ def get_integrations_prompt() -> str:
     Returns empty string if no integrations are enabled.
     """
     integrations = load_integrations()
-    enabled = [
-        i for i in integrations
-        if i.get("enabled", True) and i.get("integration_type", "api") != "codex"
-    ]
+    enabled = [i for i in integrations if i.get("enabled", True)]
     if not enabled:
         return ""
 

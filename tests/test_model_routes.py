@@ -24,15 +24,6 @@ if "core.database" not in sys.modules:
         setattr(_core_db, _name, MagicMock())
     sys.modules["core.database"] = _core_db
 
-# Some route regression tests intentionally stub src.endpoint_resolver before
-# importing their target modules. If this file is collected after them in the
-# same process, make sure model_routes sees the real helper module.
-if "src.endpoint_resolver" in sys.modules and isinstance(
-    getattr(sys.modules["src.endpoint_resolver"], "_anthropic_api_root", None),
-    MagicMock,
-):
-    del sys.modules["src.endpoint_resolver"]
-
 import routes.model_routes as model_routes
 import src.endpoint_resolver as endpoint_resolver
 from routes.model_routes import (

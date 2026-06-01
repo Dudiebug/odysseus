@@ -3072,13 +3072,6 @@ function initCodexAuth(root) {
     diagEl.classList.remove('hidden');
   }
 
-  function safeCodexLogBody(data) {
-    if (!data || typeof data !== 'object') return data;
-    const copy = { ...data };
-    if (copy.user_code) copy.user_code = '[redacted]';
-    return copy;
-  }
-
   function render(data) {
     const st = data.status || 'unknown';
     const codexAuthed = !!(data.codex_authenticated || data.authenticated);
@@ -3124,7 +3117,6 @@ function initCodexAuth(root) {
     try {
       const res = await fetch(`/api/codex-auth/${path}`, { method: method || 'GET', credentials: 'same-origin' });
       const data = await res.json().catch(() => ({ status: 'failed', message: `HTTP ${res.status}` }));
-      console.debug(`codex ${path} response`, { status: res.status, body: safeCodexLogBody(data) });
       if (res.status === 401 || res.status === 403) {
         data.status = 'auth_required';
         data.error_code = 'auth_required';
@@ -3137,7 +3129,6 @@ function initCodexAuth(root) {
       render(data);
       return data;
     } catch (e) {
-      console.debug(`codex ${path} request failed`, e);
       const data = { status: 'failed', message: `Request failed: ${e.message || e}` };
       render(data);
       return data;
@@ -3157,8 +3148,6 @@ function initCodexAuth(root) {
   }
 
   startBtn.addEventListener('click', async () => {
-    console.debug('codex sign-in clicked');
-    console.debug('calling /api/codex-auth/start');
     const data = await request('start', 'POST', 'Requesting Codex device code...');
     if (data.status === 'pending' && data.verification_url && data.user_code) {
       setResult('Device code ready. Complete sign-in in the browser.', 'var(--green,#50fa7b)');
@@ -3172,8 +3161,6 @@ function initCodexAuth(root) {
     if (!pollTimer) pollTimer = setInterval(refresh, 2500);
   });
   testBtn?.addEventListener('click', async () => {
-    console.debug('codex test clicked');
-    console.debug('calling /api/codex-auth/test');
     const data = await request('test', 'POST', 'Testing Codex connection...');
     if (data.ok) {
       statusEl.textContent = 'Codex connection is available';
@@ -3216,7 +3203,7 @@ async function initUnifiedIntegrations() {
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, codexRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
       fetch('/api/calendar/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -3224,16 +3211,21 @@ async function initUnifiedIntegrations() {
       fetch('/api/email/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/mcp/servers', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+      fetch('/api/codex-auth/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
     ]);
     const items = [];
     // API integrations
     for (const intg of (apiRes.integrations || [])) {
-      if ((intg.integration_type || 'api') === 'codex') {
-        items.push({ type: 'codex', id: intg.id, name: intg.name || 'Codex / ChatGPT', detail: 'ChatGPT sign-in through the Codex CLI', enabled: intg.enabled !== false, data: intg });
-      } else {
-        items.push({ type: 'api', id: intg.id, name: intg.name || 'Unnamed', detail: intg.base_url || '', enabled: intg.enabled !== false, data: intg });
-      }
+      items.push({ type: 'api', id: intg.id, name: intg.name || 'Unnamed', detail: intg.base_url || '', enabled: intg.enabled !== false, data: intg });
     }
+    items.push({
+      type: 'codex',
+      id: '__codex__',
+      name: 'Codex / ChatGPT',
+      detail: codexRes.message || 'ChatGPT sign-in through the Codex CLI',
+      enabled: !!(codexRes.codex_authenticated || codexRes.authenticated),
+      data: codexRes,
+    });
     // CalDAV
     if (calRes.url) {
       items.push({ type: 'caldav', id: '__caldav__', name: 'Calendar (CalDAV)', detail: calRes.url, enabled: true, data: calRes });
@@ -3344,7 +3336,7 @@ async function initUnifiedIntegrations() {
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
-          else if (type === 'codex') await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'codex') await fetch('/api/codex-auth/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
         await renderList();
@@ -4406,65 +4398,7 @@ async function initUnifiedIntegrations() {
   }
 
   // ── Add button with type picker ──
-  async function findCodexIntegration() {
-    try {
-      const r = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
-      const d = await r.json();
-      return (d.integrations || []).find(i => (i.integration_type || 'api') === 'codex') || null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  async function showCodexForm(editId) {
-    const isEdit = editId && editId !== 'new';
-    if (!isEdit) {
-      const existing = await findCodexIntegration();
-      if (existing?.id) {
-        await showCodexForm(existing.id);
-        return;
-      }
-      formEl.innerHTML = `
-        <div class="admin-card" style="margin-top:8px">
-          <h2 style="font-size:13px">Add Codex / ChatGPT</h2>
-          <div class="admin-toggle-sub" style="margin-bottom:8px">Adds host-level ChatGPT sign-in through the official Codex CLI device-code flow.</div>
-          <div class="settings-row" style="margin-top:4px;flex-wrap:wrap;gap:6px">
-            <button type="button" class="admin-btn-sm" id="uf-codex-add">Add Codex / ChatGPT</button>
-            <button type="button" class="admin-btn-sm" id="uf-codex-cancel" style="opacity:0.75">Cancel</button>
-            <span id="uf-codex-msg" style="font-size:11px"></span>
-          </div>
-        </div>`;
-      el('uf-codex-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
-      el('uf-codex-add').addEventListener('click', async () => {
-        const msg = el('uf-codex-msg');
-        msg.textContent = 'Adding...';
-        msg.style.color = '';
-        try {
-          const r = await fetch('/api/auth/integrations', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              integration_type: 'codex',
-              name: 'Codex / ChatGPT',
-              auth_type: 'none',
-              enabled: true,
-              description: 'ChatGPT sign-in through the official Codex CLI device-code flow.',
-            }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok || !d.integration?.id) throw new Error(d.detail || d.error || `HTTP ${r.status}`);
-          await renderList();
-          notifyIntegrationsChanged();
-          await showCodexForm(d.integration.id);
-        } catch (e) {
-          msg.textContent = `Failed: ${e.message || e}`;
-          msg.style.color = 'var(--red)';
-        }
-      });
-      return;
-    }
-
+  async function showCodexForm() {
     formEl.innerHTML = `
       <div class="admin-card" id="codex-auth-card" style="margin-top:8px">
         <h2 style="font-size:13px">${INTG_TYPES.codex.icon} Codex / ChatGPT</h2>

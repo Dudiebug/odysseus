@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from src.codex_auth import CodexAuthService
 
@@ -34,6 +35,37 @@ def test_status_parses_chatgpt_login(monkeypatch):
     assert out["authenticated"] is True
     assert out["codex_authenticated"] is True
     assert out["auth_mode"] == "ChatGPT"
+
+
+def test_status_does_not_echo_unrecognized_cli_output(monkeypatch):
+    svc = CodexAuthService(enabled=True)
+    monkeypatch.setattr(svc, "_bin_path", lambda: "/usr/bin/codex")
+
+    async def fake_run(args, timeout=15.0):
+        return 0, "access_token=secret refresh_token=secret"
+
+    monkeypatch.setattr(svc, "_run_command", fake_run)
+    out = run(svc.status())
+    assert out["status"] == "not_authenticated"
+    assert "secret" not in out["message"]
+    assert "token" not in out["message"].lower()
+
+
+def test_codex_home_delegated_without_auth_file_access(monkeypatch, tmp_path):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text('{"access_token":"secret"}')
+    real_open = open
+
+    def guarded_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(auth_file):
+            raise AssertionError("Odysseus must not read or write Codex auth.json")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", guarded_open)
+    svc = CodexAuthService(codex_bin="definitely-not-codex", codex_home=str(tmp_path), enabled=True)
+    out = run(svc.status())
+    assert out["status"] == "cli_missing"
+    assert out["codex_home_configured"] is True
 
 
 def test_disabled_state():
@@ -170,7 +202,22 @@ def test_logout_runs_codex_logout(monkeypatch):
     monkeypatch.setattr(svc, "_run_command", fake_run)
     out = run(svc.logout())
     assert out["status"] == "logged_out"
+    assert out["message"] == "Codex credentials removed"
     assert ["logout"] in calls
+
+
+def test_logout_failure_does_not_echo_cli_output(monkeypatch):
+    svc = CodexAuthService(enabled=True)
+    monkeypatch.setattr(svc, "_bin_path", lambda: "/usr/bin/codex")
+
+    async def fake_run(args, timeout=15.0):
+        return 1, "refresh_token=secret"
+
+    monkeypatch.setattr(svc, "_run_command", fake_run)
+    out = run(svc.logout())
+    assert out["status"] == "failed"
+    assert out["message"] == "Codex logout failed"
+    assert "secret" not in str(out)
 
 
 def test_test_requires_authenticated_status(monkeypatch):
