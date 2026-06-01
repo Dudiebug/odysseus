@@ -13,6 +13,7 @@ class CodexTestChatRequest(BaseModel):
     messages: list[dict[str, Any]] | None = None
     model: str | None = None
     timeout_seconds: int | None = None
+    odysseus_session_id: str | None = None
 
 
 def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None) -> APIRouter:
@@ -40,6 +41,7 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
             messages,
             model=body.model,
             timeout_seconds=body.timeout_seconds or 120,
+            odysseus_session_id=getattr(body, "odysseus_session_id", None),
         )
 
     return router
