@@ -3023,7 +3023,7 @@ const INTG_TYPES = {
 
 let _unifiedInited = false;
 
-function initCodexAuth(root) {
+function initCodexAuth(root, onStateChange) {
   const scope = root || document;
   const q = (id) => scope.querySelector ? scope.querySelector(`#${id}`) : el(id);
   const statusEl = q('codex-auth-status');
@@ -3041,6 +3041,30 @@ function initCodexAuth(root) {
   startBtn.dataset.codexAuthInited = '1';
 
   let pollTimer = null;
+  let lastListState = null;
+
+  function codexListState(data) {
+    const authenticated = !!(data?.codex_authenticated || data?.authenticated);
+    const running = !!(
+      data?.device_login_active
+      || data?.process_running
+      || data?.status === 'starting'
+      || data?.status === 'pending'
+    );
+    return `${authenticated ? '1' : '0'}:${running ? '1' : '0'}`;
+  }
+
+  function notifyStateChange(data) {
+    if (typeof onStateChange !== 'function') return;
+    const next = codexListState(data);
+    if (lastListState === null) {
+      lastListState = next;
+      return;
+    }
+    if (next === lastListState) return;
+    lastListState = next;
+    onStateChange(data);
+  }
 
   function setBusy(btn, busy) {
     if (!btn) return;
@@ -3127,10 +3151,12 @@ function initCodexAuth(root) {
         data.message = data.message || data.detail || `HTTP ${res.status}`;
       }
       render(data);
+      notifyStateChange(data);
       return data;
     } catch (e) {
       const data = { status: 'failed', message: `Request failed: ${e.message || e}` };
       render(data);
+      notifyStateChange(data);
       return data;
     }
   }
@@ -3218,14 +3244,30 @@ async function initUnifiedIntegrations() {
     for (const intg of (apiRes.integrations || [])) {
       items.push({ type: 'api', id: intg.id, name: intg.name || 'Unnamed', detail: intg.base_url || '', enabled: intg.enabled !== false, data: intg });
     }
-    items.push({
-      type: 'codex',
-      id: '__codex__',
-      name: 'Codex / ChatGPT',
-      detail: codexRes.message || 'ChatGPT sign-in through the Codex CLI',
-      enabled: !!(codexRes.codex_authenticated || codexRes.authenticated),
-      data: codexRes,
-    });
+    const codexAuthed = !!(codexRes.codex_authenticated || codexRes.authenticated);
+    const codexRunning = !!(
+      codexRes.device_login_active
+      || codexRes.process_running
+      || codexRes.status === 'starting'
+      || codexRes.status === 'pending'
+    );
+    const codexVisible = codexAuthed || codexRunning;
+    if (codexVisible) {
+      let codexDetail = 'ChatGPT sign-in through the Codex CLI';
+      if (codexAuthed && codexRes.auth_mode) codexDetail = `Signed in with ${codexRes.auth_mode}`;
+      else if (codexRunning) codexDetail = 'Device-code sign-in in progress';
+      else if (['not_authenticated', 'logged_out', 'canceled'].includes(codexRes.status)) codexDetail = 'Not signed in';
+      else if (codexRes.status === 'cli_missing' || codexRes.status === 'cli_not_executable') codexDetail = 'Codex CLI unavailable';
+      else if (codexRes.message && !/credential/i.test(codexRes.message)) codexDetail = codexRes.message;
+      items.push({
+        type: 'codex',
+        id: '__codex__',
+        name: 'Codex / ChatGPT',
+        detail: codexDetail,
+        enabled: codexAuthed,
+        data: codexRes,
+      });
+    }
     // CalDAV
     if (calRes.url) {
       items.push({ type: 'caldav', id: '__caldav__', name: 'Calendar (CalDAV)', detail: calRes.url, enabled: true, data: calRes });
@@ -4422,7 +4464,7 @@ async function initUnifiedIntegrations() {
         </div>
       </div>`;
     el('uf-codex-close').addEventListener('click', () => { formEl.style.display = 'none'; });
-    initCodexAuth(formEl);
+    initCodexAuth(formEl, () => renderList());
   }
 
   if (addBtn) {

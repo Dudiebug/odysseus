@@ -212,7 +212,7 @@ class CodexAuthService:
                 state["process_running"] = True
                 return {**caps, **state}
             if (
-                self._state.status in {"failed", "timeout", "canceled", "logged_out", "succeeded"}
+                self._state.status in {"failed", "timeout", "canceled", "succeeded"}
                 and time.time() - self._state.updated_at < 300
             ):
                 return {**caps, **state}

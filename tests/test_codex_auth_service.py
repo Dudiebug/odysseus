@@ -206,6 +206,27 @@ def test_logout_runs_codex_logout(monkeypatch):
     assert ["logout"] in calls
 
 
+def test_status_after_logout_rechecks_codex_login_status(monkeypatch):
+    svc = CodexAuthService(enabled=True)
+    calls = []
+    monkeypatch.setattr(svc, "_bin_path", lambda: "/usr/bin/codex")
+
+    async def fake_run(args, timeout=15.0):
+        calls.append(args)
+        if args == ["logout"]:
+            return 0, "Successfully logged out\n"
+        return 1, "Not logged in\n"
+
+    monkeypatch.setattr(svc, "_run_command", fake_run)
+    out = run(svc.logout())
+    assert out["status"] == "logged_out"
+
+    status = run(svc.status())
+    assert status["status"] == "not_authenticated"
+    assert status["message"] == "Codex CLI ready. Not signed in."
+    assert calls == [["logout"], ["login", "status"]]
+
+
 def test_logout_failure_does_not_echo_cli_output(monkeypatch):
     svc = CodexAuthService(enabled=True)
     monkeypatch.setattr(svc, "_bin_path", lambda: "/usr/bin/codex")
