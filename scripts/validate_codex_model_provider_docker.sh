@@ -85,7 +85,13 @@ if data.get("status") != expected_status:
     fail(f"expected status={expected_status!r}, got {data.get('status')!r}: {data}")
 if bool(data.get("feature_enabled")) != (expected_feature == "true"):
     fail(f"feature_enabled mismatch: {data}")
-for key in ("chat_supported", "streaming_supported", "session_resume_supported", "tool_execution_allowed"):
+if expected_status == "available":
+    if data.get("chat_supported") is not True:
+        fail(f"chat_supported must be true only for safe available provider: {data}")
+else:
+    if data.get("chat_supported") is not False:
+        fail(f"chat_supported must remain false for status {expected_status}: {data}")
+for key in ("streaming_supported", "session_resume_supported", "tool_execution_allowed"):
     if data.get(key) is not False:
         fail(f"{key} must remain false: {data}")
 dump = json.dumps(data).lower()
@@ -100,6 +106,33 @@ if expected_status == "available":
 else:
     if models:
         fail(f"models should be empty for status {expected_status}: {data}")
+print("ok")
+PY
+}
+
+assert_test_chat_payload() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def fail(msg):
+    raise SystemExit(msg)
+
+if data.get("ok") is not True:
+    fail(f"expected ok=true from test-chat: {data}")
+message = data.get("message")
+if not isinstance(message, str) or not message.strip():
+    fail(f"test-chat response missing assistant message: {data}")
+for key in ("streaming_supported", "session_resume_supported", "tool_execution_allowed"):
+    if data.get(key) is not False:
+        fail(f"{key} must remain false: {data}")
+dump = json.dumps(data).lower()
+for forbidden in ("access_token", "refresh_token", "id_token", "secret", "bearer "):
+    if forbidden in dump:
+        fail(f"response contains forbidden token-like field/text: {forbidden}")
 print("ok")
 PY
 }
@@ -190,6 +223,15 @@ request_codex_auth() {
   curl -fsS -b "${COOKIE_JAR}" -X "${method}" "${BASE_URL}/api/codex-auth/${path}" > "${file}"
 }
 
+request_test_chat() {
+  local file="$1"
+  curl -fsS -b "${COOKIE_JAR}" \
+    -H "Content-Type: application/json" \
+    -X POST "${BASE_URL}/api/codex-model-provider/test-chat" \
+    --data '{"prompt":"Reply with exactly: codex provider test ok","timeout_seconds":180}' \
+    > "${file}"
+}
+
 poll_until_codex_authenticated() {
   local status_file
   status_file="$(mktemp)"
@@ -233,7 +275,7 @@ main() {
   set_flag false
   restart_app
   login_admin
-  local unauth_code disabled_file logged_out_file logged_in_file after_logout_file start_file logout_file
+  local unauth_code disabled_file logged_out_file logged_in_file test_chat_file after_logout_file start_file logout_file
   disabled_file="$(mktemp)"
   unauth_code="$(curl -sS -o /dev/null -w "%{http_code}" "${BASE_URL}/api/codex-model-provider/status")"
   [ "${unauth_code}" = "403" ] || die "admin gate check failed: unauthenticated status returned HTTP ${unauth_code}, expected 403"
@@ -279,6 +321,10 @@ main() {
   request_status "${logged_in_file}"
   assert_status_payload "${logged_in_file}" available true >/dev/null
   rm -f "${logged_in_file}"
+  test_chat_file="$(mktemp)"
+  request_test_chat "${test_chat_file}"
+  assert_test_chat_payload "${test_chat_file}" >/dev/null
+  rm -f "${test_chat_file}"
 
   log "State 4: logout after login"
   logout_file="$(mktemp)"

@@ -30,7 +30,9 @@ The script validates:
 - feature flag enabled plus logged-out Codex returns `status=sign_in_required`
 - feature flag enabled plus logged-in Codex returns `status=available`
 - the synthetic model id is `codex-cli/chatgpt-experimental`
-- chat, streaming, session resume, and tool execution support remain false
+- `POST /api/codex-model-provider/test-chat` returns a completed assistant message
+- status reports chat support only when the adapter passes safety preflight
+- streaming, session resume, and tool execution support remain false
 - response bodies do not include token-like fields such as access or refresh tokens
 - logout returns the provider status to `sign_in_required`
 

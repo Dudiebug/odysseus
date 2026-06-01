@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_ID,
     CODEX_MODEL_PROVIDER_FLAG,
+    CODEX_EXPERIMENTAL_MODEL_DISPLAY,
+    CodexCliChatAdapter,
     CodexModelProvider,
 )
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
@@ -31,10 +33,42 @@ class _FakeService:
         self.calls += 1
         return dict(self.payload)
 
+    def _bin_path(self):
+        return "/usr/bin/codex"
+
+    def _env(self):
+        return {"PATH": "/usr/bin"}
+
+
+class _FakeAdapter:
+    async def available(self):
+        return {
+            "ok": True,
+            "status": "available",
+            "chat_supported": True,
+            "streaming_supported": False,
+            "session_resume_supported": False,
+            "tool_execution_allowed": False,
+            "limitations": [],
+        }
+
+    async def complete(self, messages, model=None, timeout_seconds=120):
+        return {
+            "ok": True,
+            "status": "ok",
+            "message": "mock response",
+            "duration_ms": 1,
+            "model": model or CODEX_EXPERIMENTAL_MODEL_ID,
+            "limitations": [],
+            "streaming_supported": False,
+            "session_resume_supported": False,
+            "tool_execution_allowed": False,
+        }
+
 
 def _provider(payload):
     svc = _FakeService(payload)
-    return CodexModelProvider(lambda: svc), svc
+    return CodexModelProvider(lambda: svc, chat_adapter=_FakeAdapter()), svc
 
 
 def test_codex_model_provider_hidden_when_flag_disabled(monkeypatch):
@@ -83,7 +117,12 @@ def test_codex_model_provider_reports_experimental_model_when_authenticated(monk
     assert out["status"] == "available"
     assert out["authenticated"] is True
     assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
+    assert out["models"][0]["display"] == CODEX_EXPERIMENTAL_MODEL_DISPLAY
     assert out["models"][0]["experimental"] is True
+    assert out["chat_supported"] is True
+    assert out["streaming_supported"] is False
+    assert out["session_resume_supported"] is False
+    assert out["tool_execution_allowed"] is False
     assert "secret" not in str(out)
     assert "access_token" not in str(out)
     assert "refresh_token" not in str(out)
@@ -142,3 +181,133 @@ def test_codex_model_provider_route_is_admin_gated(monkeypatch):
         assert getattr(exc, "status_code", None) == 403
     else:
         raise AssertionError("non-admin request should fail")
+
+
+def test_codex_model_provider_test_chat_route_is_admin_gated(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
+    router = setup_codex_model_provider_routes(provider)
+    test_chat = _endpoint(router, "/api/codex-model-provider/test-chat", "POST")
+
+    body = SimpleNamespace(prompt="hello", messages=None, model=None, timeout_seconds=None)
+    out = run(test_chat(_request(user="admin"), body))
+    assert out["ok"] is True
+    assert out["message"] == "mock response"
+
+    try:
+        run(test_chat(_request(user="bob"), body))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    else:
+        raise AssertionError("non-admin request should fail")
+
+
+def test_codex_model_provider_test_chat_requires_body(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
+    router = setup_codex_model_provider_routes(provider)
+    test_chat = _endpoint(router, "/api/codex-model-provider/test-chat", "POST")
+
+    body = SimpleNamespace(prompt="", messages=None, model=None, timeout_seconds=None)
+    out = run(test_chat(_request(user="admin"), body))
+    assert out["ok"] is False
+    assert out["status"] == "invalid_request"
+
+
+def test_adapter_success_from_mocked_subprocess(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append((args, cwd, env))
+        if args[-1] == "--help":
+            return 0, "Usage: codex exec --sandbox <MODE> --ask-for-approval <POLICY> --json", ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "Say ok"}]))
+
+    assert out["ok"] is True
+    assert out["message"] == "codex provider test ok"
+    assert out["streaming_supported"] is False
+    assert out["session_resume_supported"] is False
+    assert out["tool_execution_allowed"] is False
+    assert calls[1][1]
+    assert "--sandbox" in calls[1][0]
+    assert "read-only" in calls[1][0]
+    assert "--ask-for-approval" in calls[1][0]
+    assert "never" in calls[1][0]
+
+
+def test_adapter_handles_timeout(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[-1] == "--help":
+            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
+        return 124, "", "access_token=secret"
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "hello"}], timeout_seconds=1))
+
+    assert out["ok"] is False
+    assert out["status"] == "timeout"
+    assert "secret" not in str(out)
+
+
+def test_adapter_handles_cli_nonzero_and_redacts(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[-1] == "--help":
+            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
+        return 2, "", "refresh_token=secret failed"
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "hello"}]))
+
+    assert out["ok"] is False
+    assert out["status"] == "cli_failed"
+    assert "secret" not in str(out)
+    assert "refresh_token" not in str(out)
+
+
+def test_adapter_refuses_unsafe_cli_help(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
+
+    async def runner(args, timeout, cwd=None, env=None):
+        return 0, "Usage: codex exec --json", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.available())
+
+    assert out["ok"] is False
+    assert out["status"] == "unsupported_unsafe_cli_mode"
+    assert "--sandbox" in out["missing_flags"]
+    assert "--ask-for-approval" in out["missing_flags"]
+
+
+def test_status_does_not_expose_model_when_adapter_is_unsafe(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+
+    class UnsafeAdapter:
+        async def available(self):
+            return {"ok": False, "status": "unsupported_unsafe_cli_mode"}
+
+    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
+    provider = CodexModelProvider(lambda: svc, chat_adapter=UnsafeAdapter())
+
+    out = run(provider.status())
+
+    assert out["status"] == "unsupported_unsafe_cli_mode"
+    assert out["models"] == []
+    assert out["chat_supported"] is False
