@@ -13,7 +13,6 @@ import os
 import re
 import tempfile
 import time
-from pathlib import Path
 from typing import Any, Callable
 
 from src.codex_auth import get_codex_auth_service
@@ -22,7 +21,6 @@ from src.codex_auth import get_codex_auth_service
 CODEX_MODEL_PROVIDER_FLAG = "ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED"
 CODEX_EXPERIMENTAL_MODEL_ID = "codex-cli/chatgpt-experimental"
 CODEX_EXPERIMENTAL_MODEL_DISPLAY = "Codex CLI / ChatGPT (experimental, non-streaming)"
-CODEX_VIRTUAL_ENDPOINT_URL = "odysseus://codex-cli"
 CODEX_CHAT_TIMEOUT_SECONDS = 120
 
 _TOKEN_PATTERNS = (
@@ -32,15 +30,10 @@ _TOKEN_PATTERNS = (
 
 _LIMITATIONS = [
     "Non-streaming: returns one completed assistant message.",
-    "Session resume depends on the installed Codex CLI.",
+    "Stateless: session/resume is not implemented.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
     "The adapter requires Codex CLI sandbox/approval flags before running.",
 ]
-
-_UNSAFE_FLAGS = (
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--yolo",
-)
 
 
 def _truthy(value: str | None) -> bool:
@@ -58,12 +51,6 @@ def _sanitize_text(text: str | None, limit: int = 2000) -> str:
     return safe.strip()[:limit]
 
 
-def is_codex_virtual_endpoint(endpoint_url: str | None, model: str | None = None) -> bool:
-    return (endpoint_url or "").strip() == CODEX_VIRTUAL_ENDPOINT_URL or (
-        (model or "").strip() == CODEX_EXPERIMENTAL_MODEL_ID
-    )
-
-
 class CodexCliChatAdapter:
     """Admin-only, non-streaming adapter boundary for `codex exec`.
 
@@ -76,13 +63,9 @@ class CodexCliChatAdapter:
         self,
         auth_service_getter: Callable[[], Any] | None = None,
         runner: Callable[..., Any] | None = None,
-        session_root: str | Path | None = None,
     ) -> None:
         self._auth_service_getter = auth_service_getter or get_codex_auth_service
         self._runner = runner
-        self._session_root = Path(session_root) if session_root else Path(tempfile.gettempdir()) / "odysseus-codex-sessions"
-        self._session_map: dict[str, dict[str, Any]] = {}
-        self._reset_versions: dict[str, int] = {}
 
     async def available(self) -> dict[str, Any]:
         preflight = await self._preflight()
@@ -96,7 +79,7 @@ class CodexCliChatAdapter:
             "status": "available",
             "chat_supported": True,
             "streaming_supported": False,
-            "session_resume_supported": bool(help_result.get("session_resume_supported", False)),
+            "session_resume_supported": False,
             "tool_execution_allowed": False,
             "supports_json": help_result.get("supports_json", False),
             "limitations": list(_LIMITATIONS),
@@ -107,7 +90,6 @@ class CodexCliChatAdapter:
         messages: list[dict[str, Any]],
         model: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
-        odysseus_session_id: str | None = None,
     ) -> dict[str, Any]:
         started = time.time()
         availability = await self.available()
@@ -122,21 +104,23 @@ class CodexCliChatAdapter:
         preflight = await self._preflight()
         prompt = self._build_prompt(messages)
         timeout = max(1, min(int(timeout_seconds or CODEX_CHAT_TIMEOUT_SECONDS), 300))
-        resume_supported = bool(availability.get("session_resume_supported", False))
-        session_key = self._session_key(odysseus_session_id)
-        args, resume_mode = self._build_exec_args(
-            preflight["bin_path"],
-            prompt,
-            odysseus_session_key=session_key,
-            resume_supported=resume_supported,
-        )
-        workdir = self._ensure_workdir_for_session(session_key)
-        rc, out, err = await self._run(
-            args,
-            timeout=timeout,
-            cwd=str(workdir),
-            env=preflight["env"],
-        )
+
+        with tempfile.TemporaryDirectory(prefix="odysseus-codex-chat-") as workdir:
+            args = [
+                preflight["bin_path"],
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                prompt,
+            ]
+            rc, out, err = await self._run(
+                args,
+                timeout=timeout,
+                cwd=workdir,
+                env=preflight["env"],
+            )
 
         duration_ms = round((time.time() - started) * 1000)
         if rc == 124:
@@ -144,14 +128,6 @@ class CodexCliChatAdapter:
         if rc != 0:
             detail = _sanitize_text(err or out, limit=500)
             return self._error("cli_failed", detail or "Codex CLI failed", duration_ms, model)
-
-        codex_session_id = self._extract_session_id("\n".join([out or "", err or ""]))
-        if session_key:
-            self._session_map[session_key] = {
-                "codex_session_id": codex_session_id or (self._session_map.get(session_key) or {}).get("codex_session_id", ""),
-                "workdir": str(workdir),
-                "updated_at": time.time(),
-            }
 
         message = self._extract_message(out)
         if not message:
@@ -165,20 +141,9 @@ class CodexCliChatAdapter:
             "model": model or CODEX_EXPERIMENTAL_MODEL_ID,
             "limitations": list(_LIMITATIONS),
             "streaming_supported": False,
-            "session_resume_supported": resume_supported,
-            "session_resumed": resume_mode != "new",
-            "codex_resume_mode": resume_mode,
+            "session_resume_supported": False,
             "tool_execution_allowed": False,
         }
-
-    def reset_session(self, odysseus_session_id: str | None) -> dict[str, Any]:
-        session_key = self._session_key(odysseus_session_id)
-        if not session_key:
-            return {"ok": False, "status": "invalid_request", "error": "session_id is required"}
-        existed = session_key in self._session_map
-        self._session_map.pop(session_key, None)
-        self._reset_versions[session_key] = self._reset_versions.get(session_key, 0) + 1
-        return {"ok": True, "status": "reset", "session_mapping_cleared": existed}
 
     async def _preflight(self) -> dict[str, Any]:
         if not codex_model_provider_enabled():
@@ -218,17 +183,14 @@ class CodexCliChatAdapter:
 
     async def _exec_help(self, bin_path: str, env: dict[str, str]) -> dict[str, Any]:
         rc, out, err = await self._run([bin_path, "exec", "--help"], timeout=20, env=env)
-        top_rc, top_out, top_err = 1, "", ""
-        if rc != 0 or "--sandbox" not in (out or "") or "--ask-for-approval" not in (out or ""):
-            top_rc, top_out, top_err = await self._run([bin_path, "--help"], timeout=20, env=env)
-        help_text = "\n".join([out or "", top_out or ""])
-        if rc != 0 and top_rc != 0:
+        if rc != 0:
             return {
                 "ok": False,
                 "status": "unsupported_unsafe_cli_mode",
                 "error": "Unable to inspect codex exec safety flags",
-                "detail": _sanitize_text(err or out or top_err or top_out, limit=500),
+                "detail": _sanitize_text(err or out, limit=500),
             }
+        help_text = out or ""
         missing = [flag for flag in ("--sandbox", "--ask-for-approval") if flag not in help_text]
         if missing:
             return {
@@ -237,77 +199,12 @@ class CodexCliChatAdapter:
                 "error": "Codex CLI does not advertise required safety flags",
                 "missing_flags": missing,
             }
-        resume_supported = await self._detect_resume_support(bin_path, env, help_text)
         return {
             "ok": True,
             "status": "exec_help_ok",
             "supports_json": "--json" in help_text,
             "supports_model": "--model" in help_text or " -m" in help_text,
-            "session_resume_supported": resume_supported,
         }
-
-    async def _detect_resume_support(self, bin_path: str, env: dict[str, str], help_text: str) -> bool:
-        rc, out, err = await self._run([bin_path, "exec", "resume", "--help"], timeout=20, env=env)
-        text = "\n".join([help_text or "", out or "", err or ""]).lower()
-        if rc == 0 and "resume" in text:
-            return True
-        return bool(re.search(r"\bresume\b", text) and "exec" in text)
-
-    def _build_exec_args(
-        self,
-        bin_path: str,
-        prompt: str,
-        *,
-        odysseus_session_key: str,
-        resume_supported: bool,
-    ) -> tuple[list[str], str]:
-        safety = ["--sandbox", "read-only", "--ask-for-approval", "never"]
-        args = [bin_path, "exec"]
-        resume_mode = "new"
-        if resume_supported and odysseus_session_key:
-            mapped = self._session_map.get(odysseus_session_key) or {}
-            codex_session_id = str(mapped.get("codex_session_id") or "").strip()
-            if codex_session_id:
-                args.extend(["resume", codex_session_id])
-                resume_mode = "session_id"
-            else:
-                mapped_workdir_raw = str(mapped.get("workdir") or "")
-                can_resume_last = bool(mapped_workdir_raw and Path(mapped_workdir_raw).exists())
-                if can_resume_last:
-                    args.extend(["resume", "--last"])
-                    resume_mode = "last_in_workdir"
-        args.extend([*safety, prompt])
-        self._assert_safe_args(args)
-        return args, resume_mode
-
-    def _assert_safe_args(self, args: list[str]) -> None:
-        if "exec" not in args:
-            raise ValueError("Codex provider must use codex exec")
-        for unsafe in _UNSAFE_FLAGS:
-            if unsafe in args:
-                raise ValueError("Unsafe Codex CLI flag blocked")
-        if "--sandbox" not in args or "read-only" not in args:
-            raise ValueError("Codex provider requires read-only sandbox")
-        if "--ask-for-approval" not in args or "never" not in args:
-            raise ValueError("Codex provider requires approvals disabled")
-        if CODEX_EXPERIMENTAL_MODEL_ID in args:
-            raise ValueError("Internal Codex model id must not be passed to Codex CLI")
-
-    def _session_key(self, odysseus_session_id: str | None) -> str:
-        value = (odysseus_session_id or "").strip()
-        if not value:
-            return ""
-        return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:120]
-
-    def _workdir_path_for_session(self, session_key: str) -> Path:
-        version = self._reset_versions.get(session_key, 0)
-        safe = session_key or "one-shot"
-        return self._session_root / f"{safe}-{version}"
-
-    def _ensure_workdir_for_session(self, session_key: str) -> Path:
-        workdir = self._workdir_path_for_session(session_key)
-        workdir.mkdir(parents=True, exist_ok=True)
-        return workdir
 
     async def _run(
         self,
@@ -380,26 +277,6 @@ class CodexCliChatAdapter:
                 if isinstance(value, str) and value.strip():
                     return _sanitize_text(value)
         return text
-
-    @staticmethod
-    def _extract_session_id(output: str) -> str:
-        text = _sanitize_text(output, limit=8000)
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    data = json.loads(line)
-                except Exception:
-                    data = None
-                if isinstance(data, dict):
-                    for key in ("session_id", "conversation_id", "id"):
-                        value = data.get(key)
-                        if isinstance(value, str) and re.match(r"^[A-Za-z0-9_.:-]{8,}$", value):
-                            return value[:200]
-            match = re.search(r"(?i)\b(?:session|conversation)[ _-]?id\b[:= ]+([A-Za-z0-9_.:-]{8,})", line)
-            if match:
-                return match.group(1)[:200]
-        return ""
 
     @staticmethod
     def _error(status: str, error: str, duration_ms: int, model: str | None) -> dict[str, Any]:
@@ -488,13 +365,12 @@ class CodexModelProvider:
                 status = chat_available.get("status") or "unsupported_unsafe_cli_mode"
             else:
                 base["chat_supported"] = True
-                base["session_resume_supported"] = bool(chat_available.get("session_resume_supported", False))
                 models.append({
                     "id": CODEX_EXPERIMENTAL_MODEL_ID,
                     "display": CODEX_EXPERIMENTAL_MODEL_DISPLAY,
                     "experimental": True,
                     "streaming_supported": False,
-                    "session_resume_supported": bool(chat_available.get("session_resume_supported", False)),
+                    "session_resume_supported": False,
                 })
 
         return {
@@ -517,14 +393,5 @@ class CodexModelProvider:
         messages: list[dict[str, Any]],
         model: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
-        odysseus_session_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self._chat_adapter.complete(
-            messages,
-            model=model,
-            timeout_seconds=timeout_seconds,
-            odysseus_session_id=odysseus_session_id,
-        )
-
-    def reset_session(self, odysseus_session_id: str | None) -> dict[str, Any]:
-        return self._chat_adapter.reset_session(odysseus_session_id)
+        return await self._chat_adapter.complete(messages, model=model, timeout_seconds=timeout_seconds)

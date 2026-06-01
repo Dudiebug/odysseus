@@ -13340,24 +13340,6 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 }
 .adm-provider-item:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .adm-provider-item.active { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
-.adm-provider-codex-selected input { display: none; }
-.adm-provider-codex-selected .adm-provider-btn {
-  width: 100%;
-  border-left: 1px solid var(--border);
-  border-radius: 6px;
-}
-.adm-codex-provider-panel {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px;
-  margin-bottom: 6px;
-  background: color-mix(in srgb, var(--fg) 3%, transparent);
-}
-.adm-codex-provider-panel.hidden { display: none; }
 
 /* When the Appearance tab is open, the #settings-modal-opacity slider (in
    the header) fades the modal so the user can see the rest of the UI react

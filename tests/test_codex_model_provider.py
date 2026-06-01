@@ -4,21 +4,20 @@ import sys
 import types
 from types import SimpleNamespace
 
-if "core" not in sys.modules:
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = [os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core")]
-    sys.modules["core"] = core_pkg
-
 from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_ID,
     CODEX_MODEL_PROVIDER_FLAG,
     CODEX_EXPERIMENTAL_MODEL_DISPLAY,
-    CODEX_VIRTUAL_ENDPOINT_URL,
     CodexCliChatAdapter,
     CodexModelProvider,
-    is_codex_virtual_endpoint,
 )
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
+
+
+if "core" not in sys.modules:
+    core_pkg = types.ModuleType("core")
+    core_pkg.__path__ = [os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "core")]
+    sys.modules["core"] = core_pkg
 
 
 def run(coro):
@@ -53,7 +52,7 @@ class _FakeAdapter:
             "limitations": [],
         }
 
-    async def complete(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+    async def complete(self, messages, model=None, timeout_seconds=120):
         return {
             "ok": True,
             "status": "ok",
@@ -63,12 +62,8 @@ class _FakeAdapter:
             "limitations": [],
             "streaming_supported": False,
             "session_resume_supported": False,
-            "session_resumed": False,
             "tool_execution_allowed": False,
         }
-
-    def reset_session(self, session_id):
-        return {"ok": True, "status": "reset", "session_mapping_cleared": False}
 
 
 def _provider(payload):
@@ -243,20 +238,11 @@ def test_adapter_success_from_mocked_subprocess(monkeypatch):
     assert out["streaming_supported"] is False
     assert out["session_resume_supported"] is False
     assert out["tool_execution_allowed"] is False
-    assert calls[2][1]
-    assert "--sandbox" in calls[2][0]
-    assert "read-only" in calls[2][0]
-    assert "--ask-for-approval" in calls[2][0]
-    assert "never" in calls[2][0]
-    assert "--yolo" not in calls[2][0]
-    assert "--dangerously-bypass-approvals-and-sandbox" not in calls[2][0]
-    assert CODEX_EXPERIMENTAL_MODEL_ID not in calls[2][0]
-
-
-def test_codex_virtual_endpoint_detection():
-    assert is_codex_virtual_endpoint(CODEX_VIRTUAL_ENDPOINT_URL, CODEX_EXPERIMENTAL_MODEL_ID) is True
-    assert is_codex_virtual_endpoint(CODEX_VIRTUAL_ENDPOINT_URL, "") is True
-    assert is_codex_virtual_endpoint("https://api.openai.com/v1/chat/completions", "gpt-4o") is False
+    assert calls[1][1]
+    assert "--sandbox" in calls[1][0]
+    assert "read-only" in calls[1][0]
+    assert "--ask-for-approval" in calls[1][0]
+    assert "never" in calls[1][0]
 
 
 def test_adapter_handles_timeout(monkeypatch):
@@ -310,47 +296,6 @@ def test_adapter_refuses_unsafe_cli_help(monkeypatch):
     assert "--ask-for-approval" in out["missing_flags"]
 
 
-def test_adapter_detects_safety_flags_from_top_level_help(monkeypatch):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-    calls = []
-
-    async def runner(args, timeout, cwd=None, env=None):
-        calls.append(args)
-        if args == ["/usr/bin/codex", "exec", "--help"]:
-            return 0, "Usage: codex exec", ""
-        if args == ["/usr/bin/codex", "--help"]:
-            return 0, "Options: --sandbox --ask-for-approval", ""
-        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
-            return 1, "", "unknown"
-        return 0, "ok", ""
-
-    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
-    out = run(adapter.available())
-
-    assert out["ok"] is True
-    assert out["session_resume_supported"] is False
-    assert ["/usr/bin/codex", "--help"] in calls
-
-
-def test_adapter_detects_resume_support(monkeypatch):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-
-    async def runner(args, timeout, cwd=None, env=None):
-        if args == ["/usr/bin/codex", "exec", "--help"]:
-            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
-        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
-            return 0, "Usage: codex exec resume <SESSION_ID>", ""
-        return 0, "ok", ""
-
-    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
-    out = run(adapter.available())
-
-    assert out["ok"] is True
-    assert out["session_resume_supported"] is True
-
-
 def test_status_does_not_expose_model_when_adapter_is_unsafe(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
 
@@ -366,125 +311,3 @@ def test_status_does_not_expose_model_when_adapter_is_unsafe(monkeypatch):
     assert out["status"] == "unsupported_unsafe_cli_mode"
     assert out["models"] == []
     assert out["chat_supported"] is False
-
-
-def test_same_odysseus_session_resumes_codex_session(monkeypatch, tmp_path):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-    exec_calls = []
-
-    async def runner(args, timeout, cwd=None, env=None):
-        if args == ["/usr/bin/codex", "exec", "--help"]:
-            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
-        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
-            return 0, "Usage: codex exec resume <SESSION_ID>", ""
-        exec_calls.append((args, cwd))
-        if "resume" in args:
-            return 0, "resumed response", ""
-        return 0, '{"session_id":"codex-session-1","message":"first response"}', ""
-
-    adapter = CodexCliChatAdapter(lambda: svc, runner=runner, session_root=tmp_path)
-    first = run(adapter.complete([{"role": "user", "content": "one"}], odysseus_session_id="ody-1"))
-    second = run(adapter.complete([{"role": "user", "content": "two"}], odysseus_session_id="ody-1"))
-
-    assert first["ok"] is True
-    assert second["ok"] is True
-    assert second["session_resumed"] is True
-    assert exec_calls[1][0][0:4] == ["/usr/bin/codex", "exec", "resume", "codex-session-1"]
-    assert "--sandbox" in exec_calls[1][0]
-    assert "read-only" in exec_calls[1][0]
-    assert "--ask-for-approval" in exec_calls[1][0]
-    assert "never" in exec_calls[1][0]
-    assert "--all" not in exec_calls[1][0]
-
-
-def test_different_odysseus_sessions_do_not_share_codex_mapping(monkeypatch, tmp_path):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-    exec_calls = []
-    next_id = {"n": 0}
-
-    async def runner(args, timeout, cwd=None, env=None):
-        if args == ["/usr/bin/codex", "exec", "--help"]:
-            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
-        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
-            return 0, "Usage: codex exec resume <SESSION_ID>", ""
-        exec_calls.append(args)
-        next_id["n"] += 1
-        return 0, f'{{"session_id":"codex-session-{next_id["n"]}","message":"ok"}}', ""
-
-    adapter = CodexCliChatAdapter(lambda: svc, runner=runner, session_root=tmp_path)
-    run(adapter.complete([{"role": "user", "content": "one"}], odysseus_session_id="ody-1"))
-    run(adapter.complete([{"role": "user", "content": "two"}], odysseus_session_id="ody-2"))
-
-    assert "resume" not in exec_calls[0]
-    assert "resume" not in exec_calls[1]
-
-
-def test_reset_clears_only_selected_codex_session_mapping(monkeypatch, tmp_path):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-    exec_calls = []
-    ids = iter(["codex-a-1", "codex-b-1", "codex-a-2"])
-
-    async def runner(args, timeout, cwd=None, env=None):
-        if args == ["/usr/bin/codex", "exec", "--help"]:
-            return 0, "Usage: codex exec --sandbox --ask-for-approval", ""
-        if args == ["/usr/bin/codex", "exec", "resume", "--help"]:
-            return 0, "Usage: codex exec resume <SESSION_ID>", ""
-        exec_calls.append(args)
-        if "resume" in args:
-            return 0, "resumed", ""
-        return 0, f'{{"session_id":"{next(ids)}","message":"ok"}}', ""
-
-    adapter = CodexCliChatAdapter(lambda: svc, runner=runner, session_root=tmp_path)
-    run(adapter.complete([{"role": "user", "content": "one"}], odysseus_session_id="ody-a"))
-    run(adapter.complete([{"role": "user", "content": "one"}], odysseus_session_id="ody-b"))
-
-    reset = adapter.reset_session("ody-a")
-    assert reset["ok"] is True
-
-    run(adapter.complete([{"role": "user", "content": "again"}], odysseus_session_id="ody-a"))
-    run(adapter.complete([{"role": "user", "content": "again"}], odysseus_session_id="ody-b"))
-
-    assert "resume" not in exec_calls[2]
-    assert exec_calls[3][0:4] == ["/usr/bin/codex", "exec", "resume", "codex-b-1"]
-
-
-def test_test_chat_route_accepts_session_id_for_reuse(monkeypatch):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    seen = {}
-
-    class CapturingAdapter(_FakeAdapter):
-        async def complete(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
-            seen["session_id"] = odysseus_session_id
-            return await super().complete(messages, model=model, timeout_seconds=timeout_seconds, odysseus_session_id=odysseus_session_id)
-
-    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
-    provider = CodexModelProvider(lambda: svc, chat_adapter=CapturingAdapter())
-    router = setup_codex_model_provider_routes(provider)
-    test_chat = _endpoint(router, "/api/codex-model-provider/test-chat", "POST")
-    body = SimpleNamespace(prompt="hello", messages=None, model=None, timeout_seconds=None, session_id="ody-test")
-
-    out = run(test_chat(_request(user="admin"), body))
-
-    assert out["ok"] is True
-    assert seen["session_id"] == "ody-test"
-
-
-def test_reset_session_route_is_admin_gated(monkeypatch):
-    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
-    provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
-    router = setup_codex_model_provider_routes(provider)
-    reset = _endpoint(router, "/api/codex-model-provider/reset-session", "POST")
-    body = SimpleNamespace(session_id="ody-test")
-
-    out = run(reset(_request(user="admin"), body))
-    assert out["ok"] is True
-
-    try:
-        run(reset(_request(user="bob"), body))
-    except Exception as exc:
-        assert getattr(exc, "status_code", None) == 403
-    else:
-        raise AssertionError("non-admin request should fail")

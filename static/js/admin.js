@@ -637,8 +637,6 @@ async function _saveEpModelState(epId, panel) {
 function initEndpointForm() {
   const provider = el('adm-epProvider');
   const urlInput = el('adm-epUrl');
-  const CODEX_PROVIDER_VALUE = 'codex-cli';
-  const CODEX_TEST_SESSION_ID = 'admin-add-models-codex-test';
 
   // Custom provider picker — mirrors the (now hidden) <select id="adm-epProvider">
   // so the rest of this function (which reads provider.value and dispatches
@@ -647,21 +645,14 @@ function initEndpointForm() {
   const pickerBtn = el('adm-provider-btn');
   const pickerMenu = el('adm-provider-menu');
   const pickerCurrent = picker ? picker.querySelector('.adm-provider-current') : null;
-  const apiNormalRow = el('adm-epApiNormalRow');
-  const codexPanel = el('adm-codexProviderPanel');
-  function _isCodexProviderSelected() {
-    return provider && provider.value === CODEX_PROVIDER_VALUE;
-  }
   function _renderPickerMenu() {
     if (!pickerMenu) return;
     pickerMenu.innerHTML = Array.from(provider.options).map(o => {
       const logo = o.dataset.logo ? (providerLogo(o.dataset.logo) || '') : '';
       const active = o.value === provider.value ? ' active' : '';
-      const experimental = o.dataset.experimental === 'true' ? '<span class="admin-badge" style="margin-left:auto;">Experimental</span>' : '';
       return `<div class="adm-provider-item${active}" role="option" data-value="${o.value.replace(/"/g, '&quot;')}">
         <span class="adm-provider-logo">${logo}</span>
         <span>${o.textContent}</span>
-        ${experimental}
       </div>`;
     }).join('');
   }
@@ -694,43 +685,15 @@ function initEndpointForm() {
     });
   }
 
-  function _syncCodexProviderMode() {
-    const isCodex = _isCodexProviderSelected();
-    if (codexPanel) codexPanel.classList.toggle('hidden', !isCodex);
-    if (apiNormalRow) apiNormalRow.classList.toggle('hidden', isCodex);
-    if (urlInput) {
-      urlInput.classList.toggle('hidden', isCodex);
-      if (isCodex) {
-        urlInput.value = '';
-      } else {
-        urlInput.placeholder = 'Base URL or pick provider';
-      }
-    }
-    if (picker) picker.classList.toggle('adm-provider-codex-selected', isCodex);
-    const apiMsg = el('adm-epApiMsg');
-    if (apiMsg && isCodex) {
-      apiMsg.textContent = '';
-      apiMsg.className = 'adm-ep-inline-msg';
-    }
-    if (isCodex) _refreshCodexProviderStatus();
-  }
-
   provider.addEventListener('change', () => {
-    if (_isCodexProviderSelected()) {
-      urlInput.value = '';
-    } else if (provider.value) {
-      urlInput.value = provider.value;
-    } else {
-      urlInput.value = '';
-    }
-    _syncCodexProviderMode();
+    if (provider.value) urlInput.value = provider.value;
+    else urlInput.value = '';
   });
   urlInput.addEventListener('input', () => {
     if (provider.value && urlInput.value.trim() !== provider.value) {
       provider.value = '';
       _renderPickerMenu();
       _syncPickerCurrent();
-      _syncCodexProviderMode();
     }
   });
   function _normalizeBaseUrl(raw) {
@@ -802,6 +765,7 @@ function initEndpointForm() {
     return el(kind === 'local' ? 'adm-epLocalMsg' : 'adm-epApiMsg') || el('adm-epMsg');
   }
 
+  const codexCard = el('adm-codexProviderCard');
   const codexStatusEl = el('adm-codexProviderStatus');
   const codexDetailsEl = el('adm-codexProviderDetails');
   const codexModelEl = el('adm-codexProviderModel');
@@ -809,7 +773,6 @@ function initEndpointForm() {
   const codexSignInBtn = el('adm-codexSignInBtn');
   const codexTestBtn = el('adm-codexTestBtn');
   const codexRefreshBtn = el('adm-codexRefreshBtn');
-  const codexResetBtn = el('adm-codexResetBtn');
   let codexProviderStatus = null;
 
   function _setCodexMsg(text, cls) {
@@ -829,7 +792,7 @@ function initEndpointForm() {
   }
 
   function _renderCodexProviderStatus(data) {
-    if (!codexPanel || !codexStatusEl || !codexDetailsEl) return;
+    if (!codexCard || !codexStatusEl || !codexDetailsEl) return;
     const status = data && data.status ? data.status : 'unavailable';
     const model = Array.isArray(data?.models) && data.models.length ? data.models[0] : null;
     const available = status === 'available' && data.chat_supported === true && !!model;
@@ -841,9 +804,7 @@ function initEndpointForm() {
     codexStatusEl.className = available ? 'admin-badge' : 'admin-badge admin-badge-off';
     codexStatusEl.style.color = available ? 'var(--green,#50fa7b)' : '';
 
-    let details = 'Uses Settings -> Integrations -> Codex / ChatGPT sign-in. Test chat runs through Codex CLI with read-only sandbox and no approval prompts.';
-    if (available && data.session_resume_supported) details += ' Follow-up chats in the same Odysseus session can resume the Codex CLI session.';
-    else if (available) details += ' Session resume is not available with this Codex CLI, so follow-ups fall back safely.';
+    let details = 'Experimental, non-streaming, stateless. Uses Codex CLI auth. Not added to the default model picker yet.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Sign in with Codex / ChatGPT before running the provider test.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
@@ -864,7 +825,7 @@ function initEndpointForm() {
   }
 
   async function _refreshCodexProviderStatus() {
-    if (!codexPanel) return;
+    if (!codexCard) return;
     if (codexStatusEl) {
       codexStatusEl.textContent = 'Checking';
       codexStatusEl.className = 'admin-badge admin-badge-off';
@@ -917,7 +878,6 @@ function initEndpointForm() {
           model,
           prompt: 'Reply with exactly: Codex provider UI test ok',
           timeout_seconds: 60,
-          session_id: CODEX_TEST_SESSION_ID,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -936,41 +896,18 @@ function initEndpointForm() {
     if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
   }
 
-  async function _resetCodexProviderSession() {
-    if (!codexResetBtn) return;
-    codexResetBtn.disabled = true;
-    codexResetBtn.textContent = 'Resetting...';
-    _setCodexMsg('', '');
-    try {
-      const res = await fetch('/api/codex-model-provider/reset-session', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: CODEX_TEST_SESSION_ID }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok) _setCodexMsg('Codex session mapping reset for this provider test.', 'admin-success');
-      else _setCodexMsg(data.error || 'Could not reset Codex session.', 'admin-error');
-    } catch (e) {
-      _setCodexMsg('Reset failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
-    }
-    codexResetBtn.disabled = false;
-    codexResetBtn.textContent = 'Reset Codex session';
-  }
-
   if (codexSignInBtn) {
     codexSignInBtn.addEventListener('click', () => {
       if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open('integrations');
       setTimeout(() => {
         document.dispatchEvent(new CustomEvent('odysseus:open-codex-auth'));
       }, 50);
-      _setCodexMsg('Opened Settings -> Integrations -> Codex / ChatGPT. Refresh this provider after sign-in completes.', '');
+      _setCodexMsg('Opened Settings -> Integrations -> Codex / ChatGPT. Refresh this card after sign-in completes.', '');
     });
   }
   if (codexTestBtn) codexTestBtn.addEventListener('click', _testCodexProviderChat);
   if (codexRefreshBtn) codexRefreshBtn.addEventListener('click', _refreshCodexProviderStatus);
-  if (codexResetBtn) codexResetBtn.addEventListener('click', _resetCodexProviderSession);
-  _syncCodexProviderMode();
+  _refreshCodexProviderStatus();
 
   let apiTestController = null;
   const apiTestBtn = el('adm-epApiTestBtn');

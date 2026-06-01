@@ -108,16 +108,11 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/upload",          # large files
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
 )
-_TIMEOUT_EXEMPT_EXACT = {
-    "/api/codex-model-provider/test-chat",  # own bounded Codex CLI timeout
-}
 
 
 class _RequestTimeoutMiddleware(_BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path or ""
-        if path in _TIMEOUT_EXEMPT_EXACT:
-            return await call_next(request)
         if any(path.startswith(p) for p in _TIMEOUT_EXEMPT_PREFIXES):
             return await call_next(request)
         try:
