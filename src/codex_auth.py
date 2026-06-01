@@ -8,6 +8,7 @@ the browser UI.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -17,8 +18,9 @@ from typing import Any, Optional
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-URL_RE = re.compile(r"https?://[^\s]+/codex/device\b")
+URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 CODE_RE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{3,})+\b")
+log = logging.getLogger(__name__)
 
 
 def _truthy(value: str | None) -> bool:
@@ -43,6 +45,7 @@ class CodexAuthState:
             "status": self.status,
             "message": self.message,
             "authenticated": self.authenticated,
+            "codex_authenticated": self.authenticated,
             "auth_mode": self.auth_mode,
             "verification_url": self.verification_url,
             "user_code": self.user_code,
@@ -50,6 +53,7 @@ class CodexAuthState:
             "updated_at": self.updated_at,
             "error_code": self.error_code,
             "process_running": self.process_running,
+            "device_login_active": self.process_running or self.status in {"starting", "pending"},
         }
 
 
@@ -79,11 +83,44 @@ class CodexAuthService:
         self._state = CodexAuthState()
         self._process: asyncio.subprocess.Process | None = None
         self._watch_task: asyncio.Task | None = None
+        log.debug(
+            "Codex auth service configured: enabled=%s codex_bin=%s codex_bin_from_env=%s codex_home_configured=%s",
+            self.enabled,
+            self.codex_bin,
+            "CODEX_BIN" in os.environ,
+            bool(self.codex_home),
+        )
+
+    def _candidate_bin_path(self) -> Optional[str]:
+        codex_bin = os.path.expanduser(self.codex_bin)
+        if os.path.sep in codex_bin or (os.path.altsep and os.path.altsep in codex_bin):
+            return codex_bin
+        return shutil.which(self.codex_bin)
 
     def _bin_path(self) -> Optional[str]:
-        if os.path.sep in self.codex_bin or (os.path.altsep and os.path.altsep in self.codex_bin):
-            return self.codex_bin if os.path.exists(self.codex_bin) else None
-        return shutil.which(self.codex_bin)
+        path = self._candidate_bin_path()
+        if not path:
+            return None
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+    def _bin_diagnostics(self) -> dict[str, Any]:
+        candidate = self._candidate_bin_path()
+        cli_found = bool(candidate and os.path.isfile(candidate))
+        cli_executable = bool(cli_found and os.access(candidate, os.X_OK))
+        codex_home_path = os.path.expanduser(self.codex_home) if self.codex_home else os.path.expanduser("~/.codex")
+        return {
+            "configured_binary": self.codex_bin,
+            "binary_source": "CODEX_BIN" if "CODEX_BIN" in os.environ else "default",
+            "resolved_binary_path": candidate,
+            "binary_exists": bool(candidate and os.path.exists(candidate)),
+            "binary_is_file": cli_found,
+            "binary_executable": cli_executable,
+            "cli_found": cli_found,
+            "cli_executable": cli_executable,
+            "codex_home_source": "CODEX_HOME" if "CODEX_HOME" in os.environ else "default",
+            "codex_home_configured": bool(self.codex_home),
+            "codex_home_path": codex_home_path,
+        }
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -100,7 +137,23 @@ class CodexAuthService:
             "codex_cli_available": self._bin_path() is not None,
             "codex_home": "custom" if self.codex_home else "default",
             "stores_credentials": "codex_cli",
+            "codex_authenticated": False,
+            "device_login_active": False,
+            **self._bin_diagnostics(),
         }
+
+    def _cli_unavailable_state(self, caps: dict[str, Any]) -> CodexAuthState:
+        if caps.get("cli_found"):
+            return CodexAuthState(
+                status="cli_not_executable",
+                message="Codex CLI found but CODEX_BIN is not executable",
+                error_code="cli_not_executable",
+            )
+        return CodexAuthState(
+            status="cli_missing",
+            message="Codex CLI missing or CODEX_BIN invalid",
+            error_code="cli_missing",
+        )
 
     @staticmethod
     def _classify_status_output(output: str, returncode: int) -> tuple[bool, str, str]:
@@ -121,28 +174,36 @@ class CodexAuthService:
     async def _run_command(self, args: list[str], timeout: float = 15.0) -> tuple[int, str]:
         bin_path = self._bin_path()
         if not bin_path:
+            log.warning("Codex command skipped because CLI is unavailable: %s", self._bin_diagnostics())
             return 127, "Codex CLI is not installed or CODEX_BIN is invalid"
-        proc = await asyncio.create_subprocess_exec(
-            bin_path,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=self._env(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bin_path,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=self._env(),
+            )
+        except Exception as exc:
+            log.exception("Failed to start Codex command %s", args[:1])
+            return 1, f"Failed to start Codex CLI: {exc.__class__.__name__}"
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            log.warning("Codex command timed out: %s", args[:1])
             return 124, "Command timed out"
         return proc.returncode or 0, (out or b"").decode("utf-8", errors="replace")
 
     async def status(self) -> dict[str, Any]:
         caps = self._base_capabilities()
         if not self.enabled:
+            log.info("Codex auth status requested while disabled")
             return {**caps, **CodexAuthState(status="disabled", message="Codex auth is disabled", error_code="disabled").public()}
         if not caps["codex_cli_available"]:
-            return {**caps, **CodexAuthState(status="missing_cli", message="Codex CLI is not installed or CODEX_BIN is invalid", error_code="missing_cli").public()}
+            log.warning("Codex auth status reports missing CLI: %s", self._bin_diagnostics())
+            return {**caps, **self._cli_unavailable_state(caps).public()}
 
         async with self._lock:
             state = self._state.public()
@@ -157,8 +218,12 @@ class CodexAuthService:
                 return {**caps, **state}
 
         rc, out = await self._run_command(["login", "status"], timeout=10)
+        if rc != 0:
+            log.warning("Codex login status command returned rc=%s", rc)
         authenticated, mode, msg = self._classify_status_output(out, rc)
         status = "authenticated" if authenticated else "not_authenticated"
+        if not authenticated:
+            msg = "Codex CLI ready. Not signed in."
         return {
             **caps,
             **CodexAuthState(
@@ -172,10 +237,12 @@ class CodexAuthService:
     async def start(self) -> dict[str, Any]:
         caps = self._base_capabilities()
         if not self.enabled:
+            log.info("Codex auth start requested while disabled")
             return {**caps, **CodexAuthState(status="disabled", message="Codex auth is disabled", error_code="disabled").public()}
         bin_path = self._bin_path()
         if not bin_path:
-            return {**caps, **CodexAuthState(status="missing_cli", message="Codex CLI is not installed or CODEX_BIN is invalid", error_code="missing_cli").public()}
+            log.warning("Codex auth start reports missing CLI: %s", self._bin_diagnostics())
+            return {**caps, **self._cli_unavailable_state(caps).public()}
 
         current = await self.status()
         if current.get("authenticated"):
@@ -191,14 +258,24 @@ class CodexAuthService:
                 started_at=time.time(),
                 process_running=True,
             )
-            self._process = await asyncio.create_subprocess_exec(
-                bin_path,
-                "login",
-                "--device-auth",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=self._env(),
-            )
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    bin_path,
+                    "login",
+                    "--device-auth",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=self._env(),
+                )
+            except Exception as exc:
+                log.exception("Failed to start Codex device auth")
+                self._state = CodexAuthState(
+                    status="failed",
+                    message=f"Failed to start Codex CLI: {exc.__class__.__name__}",
+                    error_code="start_failed",
+                )
+                self._process = None
+                return {**caps, **self._state.public()}
             self._watch_task = asyncio.create_task(self._watch_login(self._process))
             return {**caps, **self._state.public()}
 
@@ -221,6 +298,7 @@ class CodexAuthService:
             while True:
                 if time.time() > overall_deadline:
                     await self._terminate_process(proc)
+                    log.warning("Codex device auth timed out")
                     await _set(status="timeout", message="Codex device auth timed out", error_code="timeout", process_running=False)
                     return
                 try:
@@ -228,6 +306,7 @@ class CodexAuthService:
                 except asyncio.TimeoutError:
                     if not code and time.time() > code_seen_deadline:
                         await self._terminate_process(proc)
+                        log.warning("Codex device auth did not produce a device code")
                         await _set(status="failed", message="Codex CLI did not produce a device code", error_code="device_code_unavailable", process_running=False)
                         return
                     if proc.returncode is not None:
@@ -243,7 +322,7 @@ class CodexAuthService:
                 elif "error" in line.lower():
                     last_safe_line = line[:300]
                 found_url = URL_RE.search(line)
-                if found_url:
+                if found_url and any(host in found_url.group(0).lower() for host in ("openai.com", "chatgpt.com")):
                     url = found_url.group(0)
                 found_code = CODE_RE.search(line)
                 if found_code:
@@ -271,8 +350,10 @@ class CodexAuthService:
             else:
                 msg = last_safe_line or "Codex device-code login failed"
                 err_code = "device_auth_disabled" if "not enabled" in msg.lower() else "login_failed"
+                log.warning("Codex device auth failed with rc=%s error_code=%s", rc, err_code)
                 await _set(status="failed", message=msg, error_code=err_code, user_code="", verification_url="", process_running=False)
         except Exception:
+            log.exception("Codex device auth watcher failed")
             await _set(status="failed", message="Codex device-code login failed", error_code="login_failed", user_code="", verification_url="", process_running=False)
         finally:
             async with self._lock:
@@ -319,14 +400,18 @@ class CodexAuthService:
     async def logout(self) -> dict[str, Any]:
         await self.cancel()
         if not self.enabled:
+            log.info("Codex logout requested while disabled")
             return {**self._base_capabilities(), **CodexAuthState(status="disabled", message="Codex auth is disabled", error_code="disabled").public()}
-        if not self._bin_path():
-            return {**self._base_capabilities(), **CodexAuthState(status="missing_cli", message="Codex CLI is not installed or CODEX_BIN is invalid", error_code="missing_cli").public()}
+        caps = self._base_capabilities()
+        if not caps["codex_cli_available"]:
+            log.warning("Codex logout reports missing CLI: %s", self._bin_diagnostics())
+            return {**caps, **self._cli_unavailable_state(caps).public()}
         rc, out = await self._run_command(["logout"], timeout=20)
         clean = ANSI_RE.sub("", out or "").strip()
         if rc == 0:
             state = CodexAuthState(status="logged_out", message=clean or "Codex credentials removed")
         else:
+            log.warning("Codex logout failed with rc=%s", rc)
             state = CodexAuthState(status="failed", message=(clean or "Codex logout failed")[:300], error_code="logout_failed")
         async with self._lock:
             self._state = state
@@ -335,6 +420,7 @@ class CodexAuthService:
     async def test(self) -> dict[str, Any]:
         status = await self.status()
         if not status.get("authenticated"):
+            log.info("Codex test requested while not authenticated: status=%s error_code=%s", status.get("status"), status.get("error_code"))
             return {**status, "ok": False}
         return {**status, "ok": True}
 

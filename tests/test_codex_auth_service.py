@@ -10,9 +10,15 @@ def run(coro):
 def test_status_reports_missing_cli():
     svc = CodexAuthService(codex_bin="definitely-not-codex", enabled=True)
     out = run(svc.status())
-    assert out["status"] == "missing_cli"
-    assert out["error_code"] == "missing_cli"
+    assert out["status"] == "cli_missing"
+    assert out["error_code"] == "cli_missing"
     assert out["codex_cli_available"] is False
+    assert out["configured_binary"] == "definitely-not-codex"
+    assert out["resolved_binary_path"] is None
+    assert out["binary_exists"] is False
+    assert out["binary_executable"] is False
+    assert out["cli_found"] is False
+    assert out["cli_executable"] is False
 
 
 def test_status_parses_chatgpt_login(monkeypatch):
@@ -26,6 +32,7 @@ def test_status_parses_chatgpt_login(monkeypatch):
     out = run(svc.status())
     assert out["status"] == "authenticated"
     assert out["authenticated"] is True
+    assert out["codex_authenticated"] is True
     assert out["auth_mode"] == "ChatGPT"
 
 
@@ -177,3 +184,6 @@ def test_test_requires_authenticated_status(monkeypatch):
     out = run(svc.test())
     assert out["ok"] is False
     assert out["authenticated"] is False
+    assert out["codex_authenticated"] is False
+    assert out["status"] == "not_authenticated"
+    assert out["message"] == "Codex CLI ready. Not signed in."

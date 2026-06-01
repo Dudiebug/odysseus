@@ -2090,24 +2090,6 @@
         <!-- ═══ TOOLS TAB ═══ -->
         <!-- ═══ INTEGRATIONS TAB ═══ -->
         <div data-settings-panel="integrations" class="hidden">
-          <div class="admin-card" id="codex-auth-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 2v20"/><path d="M2 12h20"/><path d="m16 6 2 2-2 2"/><path d="m8 18-2-2 2-2"/></svg>Codex / ChatGPT</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Sign in with ChatGPT through the official Codex CLI device-code flow.</div>
-            <div id="codex-auth-status" style="font-size:12px;opacity:0.75;margin-bottom:8px;">Checking status...</div>
-            <div id="codex-auth-device" class="hidden" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;background:color-mix(in srgb, var(--panel) 70%, transparent);">
-              <div style="font-size:11px;opacity:0.65;margin-bottom:6px;">Open the verification URL, sign in, then enter this one-time code.</div>
-              <div style="display:grid;grid-template-columns:90px minmax(0,1fr);gap:6px 10px;align-items:center;font-size:12px;">
-                <span style="opacity:0.55;">URL</span><a id="codex-auth-url" href="#" target="_blank" rel="noopener noreferrer" style="color:var(--accent,var(--red));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></a>
-                <span style="opacity:0.55;">Code</span><code id="codex-auth-code" style="font-size:18px;letter-spacing:1px;"></code>
-              </div>
-            </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-              <button type="button" class="admin-btn-sm" id="codex-auth-start">Sign in with Codex</button>
-              <button type="button" class="admin-btn-sm" id="codex-auth-test" style="opacity:0.75;">Test</button>
-              <button type="button" class="admin-btn-sm hidden" id="codex-auth-cancel" style="opacity:0.75;">Cancel</button>
-              <button type="button" class="admin-btn-sm" id="codex-auth-logout" style="opacity:0.75;">Logout / Unlink</button>
-            </div>
-          </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Connections</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">All external service connections in one place.</div>
