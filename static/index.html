@@ -2064,6 +2064,27 @@
                   <button class="admin-btn-add" id="adm-epAddBtn" style="width:55px;text-align:center;">Add</button>
                 </div>
                 <div id="adm-epApiMsg" class="adm-ep-inline-msg"></div>
+                <div id="adm-codexProviderCard" class="admin-user-row" style="display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-top:10px;">
+                  <div style="display:flex;align-items:flex-start;gap:10px;">
+                    <div style="flex:1;min-width:0;">
+                      <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span>Codex / ChatGPT</span>
+                        <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
+                      </div>
+                      <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
+                        Experimental, non-streaming, stateless provider using Codex CLI auth. Not added to the default model picker yet.
+                      </div>
+                    </div>
+                    <span id="adm-codexProviderStatus" class="admin-badge admin-badge-off" style="white-space:nowrap;">Checking</span>
+                  </div>
+                  <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
+                  </div>
+                  <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
+                </div>
               </div>
             </div>
           </div>

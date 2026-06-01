@@ -4467,6 +4467,11 @@ async function initUnifiedIntegrations() {
     initCodexAuth(formEl, () => renderList());
   }
 
+  document.addEventListener('odysseus:open-codex-auth', () => {
+    formEl.style.display = '';
+    showCodexForm();
+  });
+
   if (addBtn) {
     addBtn.addEventListener('click', () => {
       formEl.style.display = '';
