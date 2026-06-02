@@ -843,10 +843,10 @@ function initEndpointForm() {
     if (type) type.disabled = isCodex;
     if (apiTestBtn) apiTestBtn.disabled = isCodex;
     if (apiCancelTestBtn) apiCancelTestBtn.disabled = isCodex;
-    if (addBtn) addBtn.disabled = isCodex;
-    if (isCodex) {
-      _setCodexOpen(true);
-      _setCodexMsg('Selected in the provider dropdown. Use the Codex card below; it is not added as a normal endpoint.', '');
+    if (addBtn) {
+      addBtn.disabled = false;
+      addBtn.textContent = 'Add';
+      addBtn.title = isCodex ? 'Add the Codex connector' : '';
     }
   }
 
@@ -911,7 +911,7 @@ function initEndpointForm() {
     const discovery = data?.model_discovery?.source || 'manual';
     _renderCodexPresetOptions(data);
     if (!models.length) {
-      const reason = (data?.connector_enabled || _isCodexProviderSelected())
+      const reason = data?.connector_enabled
         ? 'No Codex models are selected yet. Start with GPT-5.5 or add a custom model ID.'
         : 'Connector removed. Pick Codex / ChatGPT in the provider dropdown to set it up again.';
       codexModelsEl.innerHTML = `<div class="adm-codex-model-empty">${esc(reason)}</div>`;
@@ -964,7 +964,7 @@ function initEndpointForm() {
     const cliAvailable = !!data?.cli_available;
     codexProviderStatus = data || null;
     const totalCount = Array.isArray(data?.models) ? data.models.length : 0;
-    const shouldShowCard = _isCodexProviderSelected() || !!data?.connector_enabled || totalCount > 0;
+    const shouldShowCard = !!data?.connector_enabled || totalCount > 0;
     if (codexCard) codexCard.style.display = shouldShowCard ? 'flex' : 'none';
 
     codexStatusEl.textContent = _codexStatusLabel(status);
@@ -1244,6 +1244,31 @@ function initEndpointForm() {
     }
   }
 
+  async function _addCodexConnector() {
+    _setCodexMsg('Adding Codex connector...', '');
+    try {
+      const res = await fetch('/api/codex-model-provider/connector', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        _setCodexMsg(data.error || 'Could not add Codex connector.', 'admin-error');
+        return false;
+      }
+      await _refreshCodexProviderStatus();
+      await _refreshAfterEndpointChange();
+      if (codexCard) codexCard.style.display = 'flex';
+      _setCodexOpen(true);
+      _focusCodexProviderCard();
+      _setCodexMsg('Codex connector added. Add a recommended model or a custom model ID below.', 'admin-success');
+      return true;
+    } catch (e) {
+      _setCodexMsg('Could not add Codex connector: ' + (e?.message || 'request failed'), 'admin-error');
+      return false;
+    }
+  }
+
   async function _addCodexManualModel() {
     const selectedPreset = (codexPresetSelect?.value || '').trim();
     const modelId = selectedPreset === '__custom__'
@@ -1390,8 +1415,14 @@ function initEndpointForm() {
     const msg = _endpointMsg('api');
     msg.textContent = ''; msg.className = '';
     if (_isCodexProviderSelected()) {
-      _focusCodexProviderCard();
-      _setCodexMsg('Codex is not added as a normal API endpoint yet. Use the experimental card for status and Test Chat.', '');
+      const added = await _addCodexConnector();
+      if (added) {
+        msg.textContent = 'Added Codex connector';
+        msg.className = 'admin-success';
+      } else {
+        msg.textContent = 'Could not add Codex connector';
+        msg.className = 'admin-error';
+      }
       return;
     }
     const rawUrl = (urlInput.value || provider.value).trim();

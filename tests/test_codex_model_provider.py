@@ -303,6 +303,14 @@ def test_codex_model_config_remove_and_clear_connector():
     assert cfg["selected_models"] == []
 
 
+def test_codex_connector_can_exist_without_selected_models():
+    cfg = update_codex_model_config(connector_enabled=True)
+
+    assert cfg["connector_enabled"] is True
+    assert cfg["selected_models"] == []
+    assert cfg["manual_models"] == []
+
+
 def test_codex_recommended_presets_default_to_gpt_5_5_and_dedupe_selection():
     presets = codex_recommended_models()
 
@@ -489,6 +497,19 @@ def test_codex_model_provider_test_chat_requires_body(monkeypatch):
     out = run(test_chat(_request(user="admin"), body))
     assert out["ok"] is False
     assert out["status"] == "invalid_request"
+
+
+def test_codex_model_provider_connector_route_persists_empty_connector(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    provider, _ = _provider({"codex_cli_available": True, "authenticated": True})
+    router = setup_codex_model_provider_routes(provider)
+    add_connector = _endpoint(router, "/api/codex-model-provider/connector", "POST")
+
+    out = run(add_connector(_request(user="admin")))
+
+    assert out["ok"] is True
+    assert out["config"]["connector_enabled"] is True
+    assert out["config"]["selected_models"] == []
 
 
 def test_adapter_success_from_mocked_subprocess(monkeypatch):
@@ -1395,3 +1416,11 @@ def test_group_source_uses_chat_stream_and_saves_only_accumulated_text():
     assert "/api/chat_stream" in source
     assert "if (!res.ok || !res.body)" in source
     assert "content: accumulated" in source
+
+
+def test_admin_source_keeps_codex_setup_reachable_when_provider_selected():
+    source = (REPO_ROOT / "static" / "js" / "admin.js").read_text(encoding="utf-8")
+
+    assert "fetch('/api/codex-model-provider/connector'" in source
+    assert "const shouldShowCard = !!data?.connector_enabled || totalCount > 0;" in source
+    assert "msg.textContent = 'Added Codex connector';" in source

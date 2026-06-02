@@ -97,6 +97,12 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
         )
         return {"ok": True, "config": cfg}
 
+    @router.post("/connector")
+    async def add_connector(request: Request):
+        require_admin(request)
+        cfg = update_codex_model_config(connector_enabled=True)
+        return {"ok": True, "config": cfg}
+
     @router.delete("/connector")
     async def remove_connector(request: Request):
         require_admin(request)
