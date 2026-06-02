@@ -1,8 +1,8 @@
-"""Experimental Codex CLI model-provider capability boundary.
+"""Codex CLI model-provider capability boundary.
 
-This module does not implement chat dispatch. It reports whether a future
-Codex-backed provider can be exposed safely, without treating completed CLI
-output as token streaming or reading Codex credential files.
+This module implements the Codex CLI provider boundary without reading Codex
+credential files or treating completed CLI output as token streaming. Normal
+API-provider behavior remains deliberately out of scope.
 """
 
 from __future__ import annotations
@@ -17,12 +17,48 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from src.codex_auth import get_codex_auth_service
+from src.settings import load_settings, save_settings
 
 
 CODEX_MODEL_PROVIDER_FLAG = "ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED"
 CODEX_EXPERIMENTAL_MODEL_ID = "codex-cli/chatgpt-experimental"
-CODEX_EXPERIMENTAL_MODEL_DISPLAY = "Codex CLI / ChatGPT (experimental)"
+CODEX_EXPERIMENTAL_ENDPOINT_URL = "odysseus://codex-cli"
 CODEX_CHAT_TIMEOUT_SECONDS = 120
+CODEX_SETTINGS_KEY = "codex_model_provider"
+CODEX_RECOMMENDED_MODELS = (
+    {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "description": "newest frontier model for complex coding, computer use, knowledge work, and research workflows",
+        "default": True,
+    },
+    {
+        "id": "gpt-5.4",
+        "label": "GPT-5.4",
+        "description": "flagship frontier model for professional work, stronger reasoning, tool use, and agentic workflows",
+    },
+    {
+        "id": "gpt-5.4-mini",
+        "label": "GPT-5.4 Mini",
+        "description": "fast and efficient model for responsive coding tasks and subagents",
+    },
+    {
+        "id": "gpt-5.3-codex",
+        "label": "GPT-5.3 Codex",
+        "description": "coding model for complex software engineering",
+    },
+    {
+        "id": "gpt-5.3-codex-spark",
+        "label": "GPT-5.3 Codex Spark",
+        "description": "research preview for near-instant real-time coding iteration; availability may depend on plan",
+    },
+    {
+        "id": "gpt-5.2",
+        "label": "GPT-5.2",
+        "description": "previous general-purpose coding and agentic model",
+    },
+)
+_CODEX_RECOMMENDED_BY_ID = {item["id"]: item for item in CODEX_RECOMMENDED_MODELS}
 
 _TOKEN_PATTERNS = (
     re.compile(r"(?i)(access_token|refresh_token|id_token)\s*[:=]\s*['\"]?[^'\"\s,}]+"),
@@ -30,19 +66,34 @@ _TOKEN_PATTERNS = (
 )
 
 _BASE_LIMITATIONS = [
-    "Normal chat integration is not implemented.",
+    "Chat picker integration only; not a normal API endpoint.",
     "Stateless: session/resume is not implemented.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
     "The adapter requires Codex CLI sandbox support and runs with read-only sandbox mode.",
+    "Thinking controls stay hidden unless the CLI explicitly advertises supported reasoning levels.",
 ]
 
 _APPROVAL_FLAGS = ("--ask-for-approval", "--approval-policy", "--approval")
 _DANGEROUS_FLAGS = ("--dangerously-bypass-approvals-and-sandbox", "--yolo")
 _SKIP_GIT_REPO_CHECK_FLAG = "--skip-git-repo-check"
 _JSON_OUTPUT_FLAG = "--json"
-_STREAM_TEXT_KEYS = ("delta", "text", "content", "message")
-_STREAM_NESTED_KEYS = ("event", "type", "item", "output", "data")
+_MODEL_FLAGS = ("--model", "-m")
+_REASONING_FLAGS = ("--reasoning-effort", "--effort", "--thinking-level")
+_REASONING_LEVELS = ("low", "medium", "high", "maximum")
+_STREAM_CONTAINER_KEYS = ("message", "item", "data", "response")
+_STREAM_NESTED_KEYS = (*_STREAM_CONTAINER_KEYS, "output")
 _STREAM_METRIC_KEYS = ("metrics", "usage")
+_LIFECYCLE_EVENT_NAMES = {
+    "started",
+    "completed",
+    "failed",
+    "thread.started",
+    "thread.completed",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+}
+_LIFECYCLE_EVENT_SUFFIXES = (".started", ".completed", ".failed")
 _TRUST_DIRECTORY_PATTERNS = (
     re.compile(r"not\s+(inside\s+)?(a\s+)?trusted\s+(directory|git\s+repository)", re.I),
     re.compile(r"trust(ed)?\s+directory", re.I),
@@ -56,6 +107,346 @@ def _truthy(value: str | None) -> bool:
 
 def codex_model_provider_enabled() -> bool:
     return _truthy(os.getenv(CODEX_MODEL_PROVIDER_FLAG, "false"))
+
+
+def is_codex_model_selection(endpoint_url: str | None, _model: str | None = None) -> bool:
+    return (endpoint_url or "").strip() == CODEX_EXPERIMENTAL_ENDPOINT_URL
+
+
+def _sanitize_model_id(model_id: Any) -> str:
+    text = str(model_id or "").strip()
+    if not text or len(text) > 160:
+        return ""
+    if any(ch.isspace() for ch in text):
+        return ""
+    if any(ord(ch) < 32 for ch in text):
+        return ""
+    return text
+
+
+def _unique_model_ids(values: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return out
+    for value in values:
+        model_id = _sanitize_model_id(value)
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            out.append(model_id)
+    return out
+
+
+def _sanitize_optional_text(value: Any, *, limit: int = 300) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if any(ord(ch) < 32 for ch in text):
+        return ""
+    return text[:limit]
+
+
+def _sanitize_thinking_effort(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if text in _REASONING_LEVELS else None
+
+
+def codex_recommended_models() -> list[dict[str, Any]]:
+    return [dict(item) for item in CODEX_RECOMMENDED_MODELS]
+
+
+def _recommended_model_meta(model_id: str) -> dict[str, Any]:
+    item = _CODEX_RECOMMENDED_BY_ID.get(model_id) or {}
+    return {
+        "id": model_id,
+        "label": item.get("label") or _model_display(model_id),
+        "description": item.get("description") or "",
+        "source": "recommended" if item else "custom",
+        "default": bool(item.get("default")),
+    }
+
+
+def _selected_model_entry(
+    model_id: str,
+    *,
+    enabled: bool = True,
+    hidden: bool = False,
+    thinking_effort: str | None = None,
+    source: str | None = None,
+    label: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    meta = _recommended_model_meta(model_id)
+    return {
+        "id": model_id,
+        "label": label or meta["label"],
+        "description": description or meta["description"],
+        "source": source or meta["source"],
+        "enabled": enabled,
+        "hidden": hidden,
+        "thinking_effort": thinking_effort,
+    }
+
+
+def _sanitize_selected_model_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        value = {"id": value}
+    model_id = _sanitize_model_id(value.get("id") or value.get("model_id"))
+    if not model_id:
+        return None
+    recommended = _recommended_model_meta(model_id)
+    source = str(value.get("source") or recommended["source"]).strip().lower()
+    if source not in {"recommended", "custom", "manual", "codex_cli"}:
+        source = recommended["source"]
+    source = "recommended" if source in {"recommended", "codex_cli"} and model_id in _CODEX_RECOMMENDED_BY_ID else "custom"
+    label = _sanitize_optional_text(value.get("label")) or recommended["label"]
+    description = _sanitize_optional_text(value.get("description")) or recommended["description"]
+    return _selected_model_entry(
+        model_id,
+        enabled=bool(value.get("enabled", True)),
+        hidden=bool(value.get("hidden", False)),
+        thinking_effort=_sanitize_thinking_effort(value.get("thinking_effort")),
+        source=source,
+        label=label,
+        description=description,
+    )
+
+
+def _normalize_selected_models(values: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return out
+    for value in values:
+        item = _sanitize_selected_model_entry(value)
+        if not item:
+            continue
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        out.append(item)
+    return out
+
+
+def _legacy_selected_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    manual = _unique_model_ids(cfg.get("manual_models"))
+    hidden = set(_unique_model_ids(cfg.get("hidden_models")))
+    disabled = set(_unique_model_ids(cfg.get("disabled_models")))
+    out: list[dict[str, Any]] = []
+    for model_id in manual:
+        out.append(_selected_model_entry(
+            model_id,
+            enabled=model_id not in disabled,
+            hidden=model_id in hidden,
+        ))
+    return out
+
+
+def _config_projections(selected_models: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_ids = [item["id"] for item in selected_models]
+    hidden_ids = [item["id"] for item in selected_models if item.get("hidden")]
+    disabled_ids = [item["id"] for item in selected_models if not item.get("enabled", True)]
+    custom_models = [item["id"] for item in selected_models if item.get("source") == "custom"]
+    return {
+        "manual_models": selected_ids,
+        "hidden_models": hidden_ids,
+        "disabled_models": disabled_ids,
+        "custom_models": custom_models,
+        "hidden_model_ids": hidden_ids,
+    }
+
+
+def load_codex_model_config() -> dict[str, Any]:
+    cfg = load_settings().get(CODEX_SETTINGS_KEY) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    selected_models = _normalize_selected_models(cfg.get("selected_models"))
+    if not selected_models:
+        selected_models = _legacy_selected_models(cfg)
+    connector_enabled = cfg.get("connector_enabled")
+    if connector_enabled is None:
+        connector_enabled = bool(selected_models)
+    else:
+        connector_enabled = bool(connector_enabled)
+    task_defaults = cfg.get("task_defaults") or {}
+    if not isinstance(task_defaults, dict):
+        task_defaults = {}
+    projections = _config_projections(selected_models)
+    return {
+        "connector_enabled": connector_enabled,
+        "selected_models": selected_models,
+        **projections,
+        "task_defaults": task_defaults,
+    }
+
+
+def save_codex_model_config(config: dict[str, Any]) -> dict[str, Any]:
+    selected_models = _normalize_selected_models(config.get("selected_models"))
+    projections = _config_projections(selected_models)
+    clean = {
+        "connector_enabled": bool(config.get("connector_enabled")) or bool(selected_models),
+        "selected_models": selected_models,
+        **projections,
+        "task_defaults": config.get("task_defaults") if isinstance(config.get("task_defaults"), dict) else {},
+    }
+    settings = load_settings()
+    settings[CODEX_SETTINGS_KEY] = clean
+    save_settings(settings)
+    return load_codex_model_config()
+
+
+def update_codex_model_config(
+    *,
+    add_model: str | None = None,
+    hide_model: str | None = None,
+    restore_model: str | None = None,
+    enable_model: str | None = None,
+    disable_model: str | None = None,
+    remove_model: str | None = None,
+    thinking_model: str | None = None,
+    thinking_effort: str | None = None,
+    clear_all_models: bool = False,
+    connector_enabled: bool | None = None,
+) -> dict[str, Any]:
+    cfg = load_codex_model_config()
+    selected = [dict(item) for item in cfg["selected_models"]]
+
+    def _find(model_id: str) -> dict[str, Any] | None:
+        for item in selected:
+            if item["id"] == model_id:
+                return item
+        return None
+
+    if clear_all_models:
+        selected = []
+        cfg["connector_enabled"] = False
+
+    if connector_enabled is not None:
+        cfg["connector_enabled"] = bool(connector_enabled)
+
+    model_id = _sanitize_model_id(add_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["hidden"] = False
+            item["enabled"] = True
+        else:
+            selected.append(_selected_model_entry(model_id))
+        cfg["connector_enabled"] = True
+
+    model_id = _sanitize_model_id(remove_model)
+    if model_id:
+        selected = [item for item in selected if item["id"] != model_id]
+
+    model_id = _sanitize_model_id(hide_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["hidden"] = True
+            item["enabled"] = True
+
+    model_id = _sanitize_model_id(restore_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["hidden"] = False
+
+    model_id = _sanitize_model_id(enable_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["enabled"] = True
+            item["hidden"] = False
+
+    model_id = _sanitize_model_id(disable_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["enabled"] = False
+
+    model_id = _sanitize_model_id(thinking_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["thinking_effort"] = _sanitize_thinking_effort(thinking_effort)
+
+    if not selected and connector_enabled is None and not clear_all_models:
+        cfg["connector_enabled"] = False
+
+    cfg["selected_models"] = selected
+    return save_codex_model_config(cfg)
+
+
+def _model_display(model_id: str) -> str:
+    return model_id.rsplit("/", 1)[-1] or model_id
+
+
+def first_enabled_codex_model(config: dict[str, Any] | None = None) -> str:
+    cfg = config or load_codex_model_config()
+    if not cfg.get("connector_enabled"):
+        return ""
+    for item in cfg.get("selected_models") or []:
+        if item.get("enabled", True) and not item.get("hidden"):
+            return item.get("id") or ""
+    return ""
+
+
+def codex_model_default_reasoning_effort(model_id: str, config: dict[str, Any] | None = None) -> str | None:
+    target = _sanitize_model_id(model_id)
+    if not target:
+        return None
+    cfg = config or load_codex_model_config()
+    for item in cfg.get("selected_models") or []:
+        if item.get("id") == target:
+            return _sanitize_thinking_effort(item.get("thinking_effort"))
+    return None
+
+
+def is_codex_model_available(model_id: str | None, *, public_only: bool = True, config: dict[str, Any] | None = None) -> bool:
+    target = _sanitize_model_id(model_id)
+    if not target:
+        return False
+    cfg = config or load_codex_model_config()
+    if not cfg.get("connector_enabled"):
+        return False
+    for item in cfg.get("selected_models") or []:
+        if item.get("id") != target:
+            continue
+        if not public_only:
+            return True
+        return bool(item.get("enabled", True)) and not bool(item.get("hidden"))
+    return False
+
+
+def codex_model_list_item(models: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    public_models = [m for m in (models or []) if m.get("enabled", True) and not m.get("hidden")]
+    model_ids = [m["id"] for m in public_models if m.get("id")]
+    return {
+        "host": "codex",
+        "port": 0,
+        "url": CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        "models": model_ids,
+        "models_display": [m.get("display") or _model_display(m["id"]) for m in public_models if m.get("id")],
+        "models_extra": [],
+        "models_extra_display": [],
+        "endpoint_id": None,
+        "endpoint_name": "Codex / ChatGPT",
+        "category": "api",
+        "model_type": "llm",
+        "experimental": True,
+        "provider": "codex_cli",
+        "capabilities": {
+            "chat_supported": True,
+            "streaming_supported": any(m.get("streaming_supported") for m in public_models),
+            "tool_calling_supported": False,
+            "agent_tools_supported": False,
+        },
+    }
+
+
+def _looks_like_lifecycle_event_name(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and (text in _LIFECYCLE_EVENT_NAMES or text.endswith(_LIFECYCLE_EVENT_SUFFIXES))
 
 
 def _sanitize_text(text: str | None, limit: int = 2000, *, strip: bool = True) -> str:
@@ -77,6 +468,9 @@ class CodexCliCapabilities:
     skip_git_repo_check_flag: str | None = None
     supports_json: bool = False
     supports_model: bool = False
+    model_flag: str | None = None
+    reasoning_flag: str | None = None
+    reasoning_levels: tuple[str, ...] = ()
     resume_supported: bool = False
     resume_last_supported: bool = False
     resume_session_id_supported: bool = False
@@ -97,11 +491,17 @@ class CodexCliCapabilities:
     def limitations(self) -> list[str]:
         out = list(_BASE_LIMITATIONS)
         if self.streaming_supported:
-            out.append("Experimental SSE test route can stream real Codex CLI JSON events.")
+            out.append("Codex CLI JSON event streaming is available for chat streaming.")
         else:
             out.append("Streaming is not available because Codex CLI JSON event output is not advertised.")
+        if self.reasoning_flag and self.reasoning_levels:
+            out.append(
+                "Codex CLI advertises reasoning-effort levels, but Odysseus only exposes them when the CLI makes the supported levels explicit."
+            )
+        else:
+            out.append("Thinking controls are not advertised because this Codex CLI did not expose explicit supported levels.")
         if self.approval_flag:
-            out.append(f"Approval prompts are suppressed with Codex CLI {self.approval_flag}.")
+            out.append(f"Codex CLI advertises {self.approval_flag}, but this provider does not pass approval flags.")
         else:
             out.append(
                 "Approval-control flag is not available on this Codex CLI; "
@@ -125,19 +525,37 @@ class CodexCliCapabilities:
             "json_output_supported": self.supports_json,
             "streaming_supported": self.streaming_supported,
             "model_flag_supported": self.supports_model,
+            "model_flag": self.model_flag,
+            "reasoning_effort_supported": bool(self.reasoning_flag and self.reasoning_levels),
+            "reasoning_effort_flag": self.reasoning_flag,
+            "reasoning_effort_levels": list(self.reasoning_levels),
             "dangerous_flags_advertised": list(self.dangerous_flags),
         }
 
-    def build_exec_args(self, bin_path: str, prompt: str, *, json_output: bool = False) -> list[str]:
+    def build_exec_args(
+        self,
+        bin_path: str,
+        prompt: str,
+        *,
+        json_output: bool = False,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> list[str]:
         if not self.sandbox_flag:
             raise ValueError("Codex CLI sandbox support is required")
         if json_output and not self.supports_json:
             raise ValueError("Codex CLI JSON output support is required for streaming")
         args = [bin_path, "exec", self.sandbox_flag, "read-only"]
+        selected_model = _sanitize_model_id(model)
+        if selected_model and selected_model != CODEX_EXPERIMENTAL_MODEL_ID:
+            if not self.supports_model or not self.model_flag:
+                raise ValueError("Codex CLI model selection is not supported")
+            args.extend([self.model_flag, selected_model])
+        selected_effort = str(reasoning_effort or "").strip().lower()
+        if selected_effort and self.reasoning_flag and selected_effort in self.reasoning_levels:
+            args.extend([self.reasoning_flag, selected_effort])
         if self.skip_git_repo_check_flag:
             args.append(self.skip_git_repo_check_flag)
-        if self.approval_flag:
-            args.extend([self.approval_flag, "never"])
         if json_output:
             args.append(_JSON_OUTPUT_FLAG)
         args.append(prompt)
@@ -149,8 +567,6 @@ class CodexCliCapabilities:
 def _detect_sandbox_flag(help_text: str) -> str | None:
     if "--sandbox" in help_text:
         return "--sandbox"
-    if re.search(r"(^|\s)-s([,\s]|$)", help_text):
-        return "-s"
     return None
 
 
@@ -167,6 +583,35 @@ def _detect_approval_flag(help_text: str) -> str | None:
     return None
 
 
+def _detect_model_flag(help_text: str) -> str | None:
+    if "--model" in help_text:
+        return "--model"
+    if re.search(r"(^|\s)-m([,\s]|$)", help_text):
+        return "-m"
+    return None
+
+
+def _detect_reasoning_flag(help_text: str) -> str | None:
+    for flag in _REASONING_FLAGS:
+        if flag in help_text:
+            return flag
+    return None
+
+
+def _detect_reasoning_levels(help_text: str, flag: str | None) -> tuple[str, ...]:
+    if not flag:
+        return ()
+    found: list[str] = []
+    for line in (help_text or "").splitlines():
+        if flag not in line:
+            continue
+        lowered = line.lower()
+        for level in _REASONING_LEVELS:
+            if re.search(rf"\b{re.escape(level)}\b", lowered) and level not in found:
+                found.append(level)
+    return tuple(found)
+
+
 def _detect_cli_capabilities_from_help(
     exec_help: str,
     root_help: str = "",
@@ -174,6 +619,8 @@ def _detect_cli_capabilities_from_help(
 ) -> CodexCliCapabilities:
     combined = "\n".join([exec_help or "", root_help or "", resume_help or ""])
     resume_text = "\n".join([exec_help or "", root_help or ""])
+    model_flag = _detect_model_flag(exec_help or "")
+    reasoning_flag = _detect_reasoning_flag(exec_help or "")
     return CodexCliCapabilities(
         sandbox_flag=_detect_sandbox_flag(exec_help or ""),
         sandbox_modes=tuple(
@@ -183,12 +630,60 @@ def _detect_cli_capabilities_from_help(
         approval_flag=_detect_approval_flag(exec_help or ""),
         skip_git_repo_check_flag=_detect_skip_git_repo_check_flag(combined),
         supports_json=_JSON_OUTPUT_FLAG in exec_help,
-        supports_model="--model" in exec_help or " -m" in exec_help,
+        supports_model=bool(model_flag),
+        model_flag=model_flag,
+        reasoning_flag=reasoning_flag,
+        reasoning_levels=_detect_reasoning_levels(exec_help or "", reasoning_flag),
         resume_supported=bool(re.search(r"\bresume\b", resume_text)),
         resume_last_supported="--last" in resume_help,
         resume_session_id_supported=bool(re.search(r"\b(session|SESSION)(_ID| id| id)?\b", resume_help, re.I)),
         dangerous_flags=tuple(flag for flag in _DANGEROUS_FLAGS if flag in combined),
     )
+
+
+def _advertised_model_list_commands(root_help: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    if re.search(r"(?im)^\s+models?\s+", root_help or ""):
+        commands.extend([["models", "--json"], ["models"], ["model", "list", "--json"], ["model", "list"]])
+    elif re.search(r"(?im)^\s+model\s+", root_help or ""):
+        commands.extend([["model", "list", "--json"], ["model", "list"]])
+    return commands
+
+
+def _extract_model_ids_from_payload(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [_sanitize_model_id(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(_extract_model_ids_from_payload(item))
+        return [model_id for model_id in out if model_id]
+    if isinstance(value, dict):
+        for key in ("id", "name", "model"):
+            model_id = _sanitize_model_id(value.get(key))
+            if model_id:
+                return [model_id]
+        out: list[str] = []
+        for key in ("data", "models", "items"):
+            out.extend(_extract_model_ids_from_payload(value.get(key)))
+        return [model_id for model_id in out if model_id]
+    return []
+
+
+def _parse_model_list_output(output: str) -> list[str]:
+    text = output or ""
+    parsed: list[str] = []
+    try:
+        parsed = _extract_model_ids_from_payload(json.loads(text))
+    except Exception:
+        parsed = []
+    if not parsed:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.lower().startswith(("usage:", "error", "warning")):
+                continue
+            parsed.append(stripped.split()[0])
+    return _unique_model_ids(parsed)
 
 
 class CodexCliChatAdapter:
@@ -227,6 +722,8 @@ class CodexCliChatAdapter:
             "tool_execution_allowed": False,
             "supports_json": capabilities.supports_json,
             "supports_model": capabilities.supports_model,
+            "discovered_models": help_result.get("discovered_models") or [],
+            "model_discovery": help_result.get("model_discovery") or {},
             "cli_capabilities": capabilities.to_public_dict(),
             "limitations": capabilities.limitations(),
             "_preflight": preflight,
@@ -237,6 +734,7 @@ class CodexCliChatAdapter:
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
     ) -> dict[str, Any]:
@@ -256,7 +754,15 @@ class CodexCliChatAdapter:
         timeout = max(1, min(int(timeout_seconds or CODEX_CHAT_TIMEOUT_SECONDS), 300))
 
         with tempfile.TemporaryDirectory(prefix="odysseus-codex-chat-") as workdir:
-            args = capabilities.build_exec_args(preflight["bin_path"], prompt)
+            try:
+                args = capabilities.build_exec_args(
+                    preflight["bin_path"],
+                    prompt,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            except ValueError as exc:
+                return self._error("unsupported_option", str(exc), round((time.time() - started) * 1000), model, capabilities)
             rc, out, err = await self._run(
                 args,
                 timeout=timeout,
@@ -265,7 +771,12 @@ class CodexCliChatAdapter:
             )
             if rc != 0 and _is_trust_directory_error(err or out) and not capabilities.skip_git_repo_check_supported:
                 capabilities = replace(capabilities, skip_git_repo_check_flag=_SKIP_GIT_REPO_CHECK_FLAG)
-                args = capabilities.build_exec_args(preflight["bin_path"], prompt)
+                args = capabilities.build_exec_args(
+                    preflight["bin_path"],
+                    prompt,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
                 rc, out, err = await self._run(
                     args,
                     timeout=timeout,
@@ -298,6 +809,13 @@ class CodexCliChatAdapter:
             "message": message,
             "duration_ms": duration_ms,
             "model": model or CODEX_EXPERIMENTAL_MODEL_ID,
+            "reasoning_effort": (
+                reasoning_effort
+                if capabilities.reasoning_flag
+                and capabilities.reasoning_levels
+                and reasoning_effort in capabilities.reasoning_levels
+                else None
+            ),
             "limitations": capabilities.limitations(),
             "cli_capabilities": capabilities.to_public_dict(),
             "streaming_supported": capabilities.streaming_supported,
@@ -309,8 +827,10 @@ class CodexCliChatAdapter:
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
+        allow_one_shot_fallback: bool = False,
     ):
         started = time.time()
         availability = await self._available_internal()
@@ -325,6 +845,27 @@ class CodexCliChatAdapter:
         preflight = availability["_preflight"]
         capabilities = availability["_capabilities"]
         if not capabilities.streaming_supported:
+            if allow_one_shot_fallback:
+                result = await self.complete(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=timeout_seconds,
+                    odysseus_session_id=odysseus_session_id,
+                )
+                if result.get("ok"):
+                    message = result.get("message") or ""
+                    if message:
+                        yield {"type": "delta", "delta": message}
+                    yield {
+                        "type": "done",
+                        "message": message,
+                        "model": result.get("model") or model or CODEX_EXPERIMENTAL_MODEL_ID,
+                        "duration_ms": result.get("duration_ms"),
+                    }
+                else:
+                    yield self._stream_error_event(result, started=started, model=model)
+                return
             yield self._stream_error_event(
                 {
                     "ok": False,
@@ -341,13 +882,28 @@ class CodexCliChatAdapter:
         prompt = self._build_prompt(messages)
         timeout = max(1, min(int(timeout_seconds or CODEX_CHAT_TIMEOUT_SECONDS), 300))
         with tempfile.TemporaryDirectory(prefix="odysseus-codex-chat-stream-") as workdir:
-            args = capabilities.build_exec_args(preflight["bin_path"], prompt, json_output=True)
+            try:
+                args = capabilities.build_exec_args(
+                    preflight["bin_path"],
+                    prompt,
+                    json_output=True,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            except ValueError as exc:
+                yield self._stream_error_event(
+                    self._error("unsupported_option", str(exc), round((time.time() - started) * 1000), model, capabilities),
+                    started=started,
+                    model=model,
+                )
+                return
             async for event in self._stream_exec(
                 args,
                 timeout=timeout,
                 cwd=workdir,
                 env=preflight["env"],
                 model=model,
+                reasoning_effort=reasoning_effort,
                 capabilities=capabilities,
             ):
                 yield event
@@ -406,6 +962,20 @@ class CodexCliChatAdapter:
             if resume_rc == 0:
                 resume_help = resume_out or ""
         capabilities = _detect_cli_capabilities_from_help(exec_help, root_help, resume_help)
+        discovered_models: list[str] = []
+        model_discovery = {"source": "none", "commands_tried": []}
+        for command in _advertised_model_list_commands(root_help):
+            model_discovery["commands_tried"].append(" ".join(command))
+            model_rc, model_out, _ = await self._run([bin_path, *command], timeout=20, env=env)
+            if model_rc != 0:
+                continue
+            discovered_models = _parse_model_list_output(model_out or "")
+            if discovered_models:
+                model_discovery["source"] = "codex_cli"
+                model_discovery["command"] = " ".join(command)
+                break
+        if not discovered_models and capabilities.supports_model:
+            model_discovery["source"] = "manual"
         if not capabilities.ok:
             return {
                 "ok": False,
@@ -418,6 +988,8 @@ class CodexCliChatAdapter:
             "ok": True,
             "status": "exec_help_ok",
             "cli_capabilities": capabilities.to_public_dict(),
+            "discovered_models": discovered_models,
+            "model_discovery": model_discovery,
             "_capabilities": capabilities,
         }
 
@@ -434,6 +1006,7 @@ class CodexCliChatAdapter:
         env: dict[str, str],
         model: str | None,
         capabilities: CodexCliCapabilities,
+        reasoning_effort: str | None = None,
         allow_trust_retry: bool = True,
     ):
         started = time.time()
@@ -509,13 +1082,20 @@ class CodexCliChatAdapter:
             detail = _sanitize_text(stderr_text or "".join(stdout_lines), limit=500)
             if _is_trust_directory_error(detail) and not capabilities.skip_git_repo_check_supported and allow_trust_retry:
                 retry_capabilities = replace(capabilities, skip_git_repo_check_flag=_SKIP_GIT_REPO_CHECK_FLAG)
-                retry_args = retry_capabilities.build_exec_args(args[0], args[-1], json_output=True)
+                retry_args = retry_capabilities.build_exec_args(
+                    args[0],
+                    args[-1],
+                    json_output=True,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
                 async for event in self._stream_exec(
                     retry_args,
                     timeout=timeout,
                     cwd=cwd,
                     env=env,
                     model=model,
+                    reasoning_effort=reasoning_effort,
                     capabilities=retry_capabilities,
                     allow_trust_retry=False,
                 ):
@@ -582,34 +1162,88 @@ class CodexCliChatAdapter:
         return events
 
     @classmethod
-    def _extract_delta(cls, value: Any, depth: int = 0) -> str:
+    def _is_lifecycle_event(cls, value: Any) -> bool:
+        if isinstance(value, list):
+            return bool(value) and all(cls._is_lifecycle_event(item) for item in value)
+        if not isinstance(value, dict):
+            return _looks_like_lifecycle_event_name(value)
+        for key in ("type", "event"):
+            event_name = value.get(key)
+            if isinstance(event_name, str) and _looks_like_lifecycle_event_name(event_name):
+                content = cls._extract_delta(value)
+                metrics = cls._extract_metrics(value)
+                return not content and not metrics
+        return False
+
+    @classmethod
+    def _is_reasoning_event(cls, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("thinking") is True:
+            return True
+        for key in ("type", "event", "kind", "channel", "name"):
+            text = str(value.get(key) or "").strip().lower()
+            if "reasoning" in text or "thinking" in text:
+                return True
+        return False
+
+    @classmethod
+    def _extract_delta(cls, value: Any, depth: int = 0, *, in_content: bool = False) -> str:
         if depth > 6:
             return ""
         if isinstance(value, str):
-            return value if depth > 0 else ""
-        if isinstance(value, list):
-            for item in value:
-                found = cls._extract_delta(item, depth + 1)
-                if found:
-                    return found
+            if in_content and cls._is_assistant_text(value):
+                return value
             return ""
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                found = cls._extract_delta(item, depth + 1, in_content=in_content)
+                if found:
+                    parts.append(found)
+            return "".join(parts)
         if not isinstance(value, dict):
             return ""
-        for key in _STREAM_TEXT_KEYS:
+        if cls._is_reasoning_event(value):
+            return ""
+
+        event_type = str(value.get("type") or "").strip().lower()
+        if event_type in {"text", "output_text"}:
+            for key in ("text", "output_text", "content"):
+                text = value.get(key)
+                if isinstance(text, str) and cls._is_assistant_text(text):
+                    return text
+
+        for key in ("delta", "output_text", "text"):
             text = value.get(key)
-            if isinstance(text, str) and text.strip():
+            if isinstance(text, str) and cls._is_assistant_text(text):
                 return text
-        for key in _STREAM_NESTED_KEYS:
+
+        content = value.get("content")
+        if isinstance(content, str) and cls._is_assistant_text(content):
+            return content
+        if isinstance(content, (dict, list)):
+            found = cls._extract_delta(content, depth + 1, in_content=True)
+            if found:
+                return found
+
+        for key in _STREAM_CONTAINER_KEYS:
             nested = value.get(key)
             if isinstance(nested, (dict, list)):
                 found = cls._extract_delta(nested, depth + 1)
                 if found:
                     return found
-        for nested in value.values():
+        for key, nested in value.items():
+            if key in {"type", "event", "status"} or not isinstance(nested, (dict, list)):
+                continue
             found = cls._extract_delta(nested, depth + 1)
             if found:
                 return found
         return ""
+
+    @staticmethod
+    def _is_assistant_text(value: str) -> bool:
+        return bool(value.strip()) and not _looks_like_lifecycle_event_name(value)
 
     @classmethod
     def _extract_metrics(cls, value: Any, depth: int = 0) -> dict[str, Any]:
@@ -624,8 +1258,6 @@ class CodexCliChatAdapter:
         if not isinstance(value, dict):
             return {}
         event_type = str(value.get("type") or value.get("event") or "").lower()
-        if event_type in {"metrics", "metric", "usage"}:
-            return cls._sanitize_metrics(value)
         for key in _STREAM_METRIC_KEYS:
             metrics = value.get(key)
             if isinstance(metrics, dict):
@@ -634,6 +1266,12 @@ class CodexCliChatAdapter:
             found = cls._extract_metrics(value.get(key), depth + 1)
             if found:
                 return found
+        if event_type in {"metrics", "metric", "usage"}:
+            return cls._sanitize_metrics({
+                key: metric_value
+                for key, metric_value in value.items()
+                if key not in {"type", "event"}
+            })
         return {}
 
     @staticmethod
@@ -691,10 +1329,10 @@ class CodexCliChatAdapter:
     @staticmethod
     def _build_prompt(messages: list[dict[str, Any]]) -> str:
         parts = [
-            "You are replying through Odysseus' experimental Codex CLI provider.",
+            "You are replying through Odysseus' Codex CLI provider.",
             "Return only the final assistant response.",
             "Do not run tools, shell commands, file edits, or web requests.",
-            "If a request requires tools, say that this experimental provider does not support tools yet.",
+            "If a request requires tools, say that this provider does not support tools yet.",
             "",
             "Conversation:",
         ]
@@ -714,18 +1352,37 @@ class CodexCliChatAdapter:
         if not text:
             return ""
         # If a future CLI emits JSONL, prefer common completed-message fields.
+        parsed_json = False
+        non_json_lines: list[str] = []
         for line in text.splitlines():
             line = line.strip()
             if not line.startswith("{"):
+                if line:
+                    non_json_lines.append(line)
                 continue
             try:
                 data = json.loads(line)
             except Exception:
+                non_json_lines.append(line)
+                continue
+            parsed_json = True
+            if CodexCliChatAdapter._is_lifecycle_event(data):
+                continue
+            delta = CodexCliChatAdapter._extract_delta(data)
+            if delta:
+                return _sanitize_text(delta)
+            if CodexCliChatAdapter._extract_metrics(data):
                 continue
             for key in ("message", "content", "text", "output"):
                 value = data.get(key) if isinstance(data, dict) else None
-                if isinstance(value, str) and value.strip():
+                if (
+                    isinstance(value, str)
+                    and value.strip()
+                    and not _looks_like_lifecycle_event_name(value)
+                ):
                     return _sanitize_text(value)
+        if parsed_json:
+            return _sanitize_text("\n".join(non_json_lines))
         return text
 
     @staticmethod
@@ -774,6 +1431,16 @@ class CodexModelProvider:
             "session_resume_supported": False,
             "tool_execution_allowed": False,
             "limitations": list(_BASE_LIMITATIONS),
+            "model_discovery": {"source": "disabled"},
+            "recommended_models": codex_recommended_models(),
+            "connector_enabled": False,
+            "selected_models": [],
+            "manual_models": [],
+            "hidden_models": [],
+            "disabled_models": [],
+            "thinking_supported": False,
+            "thinking_effort_levels": [],
+            "thinking_activity_supported": False,
         }
         if not enabled:
             return {
@@ -814,7 +1481,13 @@ class CodexModelProvider:
             status = "available"
             requires_sign_in = False
 
-        models = []
+        cfg = load_codex_model_config()
+        base["connector_enabled"] = cfg["connector_enabled"]
+        base["selected_models"] = [dict(item) for item in cfg["selected_models"]]
+        base["manual_models"] = cfg["manual_models"]
+        base["hidden_models"] = cfg["hidden_models"]
+        base["disabled_models"] = cfg["disabled_models"]
+        models: list[dict[str, Any]] = []
         chat_available = {"ok": False}
         if status == "available":
             chat_available = await self._chat_adapter.available()
@@ -825,13 +1498,31 @@ class CodexModelProvider:
                 base["streaming_supported"] = bool(chat_available.get("streaming_supported"))
                 base["limitations"] = chat_available.get("limitations") or base["limitations"]
                 base["cli_capabilities"] = chat_available.get("cli_capabilities") or {}
-                models.append({
-                    "id": CODEX_EXPERIMENTAL_MODEL_ID,
-                    "display": CODEX_EXPERIMENTAL_MODEL_DISPLAY,
-                    "experimental": True,
-                    "streaming_supported": bool(chat_available.get("streaming_supported")),
-                    "session_resume_supported": False,
-                })
+                base["model_discovery"] = chat_available.get("model_discovery") or {"source": "manual"}
+                cap = base["cli_capabilities"]
+                base["thinking_supported"] = bool(cap.get("reasoning_effort_supported")) and bool(cap.get("reasoning_effort_levels"))
+                base["thinking_effort_levels"] = cap.get("reasoning_effort_levels") or []
+                base["thinking_activity_supported"] = False
+
+        for item in cfg["selected_models"]:
+            models.append({
+                "id": item["id"],
+                "display": item.get("label") or _model_display(item["id"]),
+                "label": item.get("label") or _model_display(item["id"]),
+                "description": item.get("description") or "",
+                "source": item.get("source") or "custom",
+                "experimental": True,
+                "hidden": bool(item.get("hidden")),
+                "enabled": bool(item.get("enabled", True)) and not bool(item.get("hidden")),
+                "thinking_effort": item.get("thinking_effort"),
+                "streaming_supported": bool(base["streaming_supported"]),
+                "thinking_supported": bool(base["thinking_supported"]),
+                "thinking_effort_levels": list(base["thinking_effort_levels"]),
+                "thinking_activity_supported": bool(base["thinking_activity_supported"]),
+                "session_resume_supported": False,
+                "tool_calling_supported": False,
+                "agent_tools_supported": False,
+            })
 
         return {
             **base,
@@ -852,12 +1543,14 @@ class CodexModelProvider:
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
     ) -> dict[str, Any]:
         return await self._chat_adapter.complete(
             messages,
             model=model,
+            reasoning_effort=reasoning_effort,
             timeout_seconds=timeout_seconds,
             odysseus_session_id=odysseus_session_id,
         )
@@ -866,16 +1559,43 @@ class CodexModelProvider:
         self,
         messages: list[dict[str, Any]],
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
+        allow_one_shot_fallback: bool = False,
     ):
         async for event in self._chat_adapter.stream_chat(
             messages,
             model=model,
+            reasoning_effort=reasoning_effort,
             timeout_seconds=timeout_seconds,
             odysseus_session_id=odysseus_session_id,
+            allow_one_shot_fallback=allow_one_shot_fallback,
         ):
             yield event
+
+
+def codex_model_list_item_if_available(provider: CodexModelProvider | None = None) -> dict[str, Any] | None:
+    """Return the picker item only when Codex has at least one enabled model."""
+    if not codex_model_provider_enabled():
+        return None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = False
+    else:
+        running_loop = True
+    if running_loop:
+        return None
+    try:
+        status = asyncio.run((provider or CodexModelProvider()).status())
+    except Exception:
+        return None
+    if status.get("status") == "available" and status.get("chat_supported") is True:
+        item = codex_model_list_item(status.get("models") or [])
+        if item.get("models"):
+            return item
+    return None
 
 
 def _is_trust_directory_error(text: str | None) -> bool:

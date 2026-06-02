@@ -4,12 +4,14 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_ID,
     CODEX_MODEL_PROVIDER_FLAG,
-    CODEX_EXPERIMENTAL_MODEL_DISPLAY,
     CodexCliChatAdapter,
     CodexModelProvider,
+    update_codex_model_config,
 )
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
 
@@ -22,6 +24,18 @@ if "core" not in sys.modules:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_codex_settings(monkeypatch, tmp_path):
+    import src.settings as settings_module
+
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "SETTINGS_FILE", str(settings_file))
+    settings_module._invalidate_caches()
+    yield
+    settings_module._invalidate_caches()
 
 
 class _FakeService:
@@ -52,7 +66,7 @@ class _FakeAdapter:
             "limitations": [],
         }
 
-    async def complete(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+    async def complete(self, messages, model=None, reasoning_effort=None, timeout_seconds=120, odysseus_session_id=None):
         return {
             "ok": True,
             "status": "ok",
@@ -65,7 +79,15 @@ class _FakeAdapter:
             "tool_execution_allowed": False,
         }
 
-    async def stream_chat(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+    async def stream_chat(
+        self,
+        messages,
+        model=None,
+        reasoning_effort=None,
+        timeout_seconds=120,
+        odysseus_session_id=None,
+        allow_one_shot_fallback=False,
+    ):
         yield {"type": "delta", "delta": "mock stream"}
         yield {"type": "done", "message": "mock stream", "model": model or CODEX_EXPERIMENTAL_MODEL_ID}
 
@@ -103,6 +125,13 @@ Options:
 """
 
 CODEX_OLD_EXEC_HELP = "Usage: codex exec --sandbox <MODE> --ask-for-approval <POLICY> --json --model <MODEL>"
+CODEX_THINKING_TOGGLE_HELP = """Usage: codex exec [OPTIONS] [PROMPT]
+
+Options:
+  -s, --sandbox <SANDBOX_MODE>
+  --json
+  --thinking
+"""
 
 
 async def _codex_help_runner(args, timeout, cwd=None, env=None, exec_help=CODEX_0135_EXEC_HELP):
@@ -185,6 +214,7 @@ def test_codex_model_provider_requires_sign_in_when_unauthenticated(monkeypatch)
 
 def test_codex_model_provider_reports_experimental_model_when_authenticated(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    update_codex_model_config(add_model="gpt-5.2-codex")
     provider, _ = _provider({
         "codex_cli_available": True,
         "authenticated": True,
@@ -199,8 +229,8 @@ def test_codex_model_provider_reports_experimental_model_when_authenticated(monk
 
     assert out["status"] == "available"
     assert out["authenticated"] is True
-    assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
-    assert out["models"][0]["display"] == CODEX_EXPERIMENTAL_MODEL_DISPLAY
+    assert out["models"][0]["id"] == "gpt-5.2-codex"
+    assert out["models"][0]["display"] == "gpt-5.2-codex"
     assert out["models"][0]["experimental"] is True
     assert out["chat_supported"] is True
     assert out["streaming_supported"] is False
@@ -348,8 +378,10 @@ def test_adapter_success_from_mocked_subprocess(monkeypatch):
     assert calls[-1][1]
     assert "--sandbox" in exec_args
     assert "read-only" in exec_args
-    assert "--ask-for-approval" in exec_args
-    assert "never" in exec_args
+    assert "--ask-for-approval" not in exec_args
+    assert "--approval-policy" not in exec_args
+    assert "--approval" not in exec_args
+    assert "never" not in exec_args
 
 
 def test_adapter_accepts_current_cli_without_approval_flag(monkeypatch):
@@ -471,14 +503,74 @@ def test_status_available_with_current_cli_help(monkeypatch):
     assert out["status"] == "available"
     assert out["chat_supported"] is True
     assert out["streaming_supported"] is True
-    assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
-    assert out["models"][0]["streaming_supported"] is True
+    assert out["models"] == []
+    assert out["model_discovery"]["source"] == "none"
     assert out["cli_capabilities"]["sandbox_supported"] is True
     assert out["cli_capabilities"]["approval_control_supported"] is False
     assert out["cli_capabilities"]["json_output_supported"] is True
     assert out["cli_capabilities"]["streaming_supported"] is True
     assert out["cli_capabilities"]["skip_git_repo_check_supported"] is False
     assert out["cli_capabilities"]["sandbox_mode"] == "read-only"
+    assert out["thinking_supported"] is False
+    assert out["thinking_effort_levels"] == []
+    assert out["thinking_activity_supported"] is False
+
+
+def test_status_does_not_advertise_thinking_from_toggle_only_help(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_THINKING_TOGGLE_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    provider = CodexModelProvider(lambda: svc, chat_adapter=adapter)
+
+    out = run(provider.status())
+
+    assert out["status"] == "available"
+    assert out["cli_capabilities"]["reasoning_effort_supported"] is False
+    assert out["cli_capabilities"]["reasoning_effort_levels"] == []
+    assert out["thinking_supported"] is False
+    assert out["thinking_effort_levels"] == []
+
+
+def test_adapter_ignores_unsupported_reasoning_effort(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_THINKING_TOGGLE_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete(
+        [{"role": "user", "content": "Say ok"}],
+        reasoning_effort="low",
+    ))
+
+    assert out["ok"] is True
+    assert out["reasoning_effort"] is None
+    assert "--thinking" not in calls[-1]
 
 
 def test_adapter_streams_json_events_with_safe_args(monkeypatch):
