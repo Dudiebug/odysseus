@@ -4458,7 +4458,7 @@ async function initUnifiedIntegrations() {
           <button type="button" class="admin-btn-sm" id="codex-auth-start">Sign in with Codex</button>
           <button type="button" class="admin-btn-sm" id="codex-auth-test" style="opacity:0.75;">Test</button>
           <button type="button" class="admin-btn-sm hidden" id="codex-auth-cancel" style="opacity:0.75;">Cancel</button>
-          <button type="button" class="admin-btn-sm" id="codex-auth-logout" style="opacity:0.75;">Logout / Unlink</button>
+          <button type="button" class="admin-btn-sm" id="codex-auth-logout" style="opacity:0.75;">Sign out</button>
           <button type="button" class="admin-btn-sm" id="uf-codex-close" style="opacity:0.75;">Close</button>
           <span id="codex-auth-result" style="font-size:11px"></span>
         </div>

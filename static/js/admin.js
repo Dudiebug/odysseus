@@ -912,23 +912,23 @@ function initEndpointForm() {
     _renderCodexPresetOptions(data);
     if (!models.length) {
       const reason = data?.connector_enabled
-        ? 'No Codex models are selected yet. Start with GPT-5.5 or add a custom model ID.'
-        : 'Connector removed. Pick Codex / ChatGPT in the provider dropdown to set it up again.';
+        ? 'No selected models yet. Start with GPT-5.5 or add a custom model ID.'
+        : 'Codex connector removed. Pick Codex / ChatGPT in the provider dropdown to set it up again.';
       codexModelsEl.innerHTML = `<div class="adm-codex-model-empty">${esc(reason)}</div>`;
       return;
     }
     codexModelsEl.innerHTML = `<div class="mcp-tools-header">
-      <span>Codex models <span class="adm-model-source-note">${esc(discovery)}</span></span>
+      <span>Selected models <span class="adm-model-source-note">${esc(discovery)}</span></span>
       <span class="mcp-tools-count">${_codexEnabledModels(data).length}/${models.length} enabled</span>
     </div><div class="mcp-tools-list adm-codex-model-list">` + models.map(m => {
       const state = m.hidden ? 'hidden' : (m.enabled === false ? 'disabled' : 'enabled');
       const source = m.source === 'recommended' ? 'recommended' : 'custom';
       const levels = Array.isArray(m?.thinking_effort_levels) ? m.thinking_effort_levels : [];
       const canThink = !!m?.thinking_supported && levels.length > 0;
-      const thinkSelect = `<select data-codex-thinking-model="${esc(m.id)}" ${canThink ? '' : 'disabled'} style="min-width:136px;">
-        <option value="">${canThink ? 'Provider default' : 'Thinking unavailable'}</option>
+      const thinkSelect = canThink ? `<select data-codex-thinking-model="${esc(m.id)}" style="min-width:136px;">
+        <option value="">Provider default</option>
         ${levels.map(level => `<option value="${esc(level)}" ${m.thinking_effort === level ? 'selected' : ''}>${esc(level)}</option>`).join('')}
-      </select>`;
+      </select>` : '';
       const primaryAction = m.hidden
         ? `<button type="button" class="admin-btn-sm" data-codex-model-action="restore" data-model-id="${esc(m.id)}">Restore</button>`
         : `<button type="button" class="admin-btn-sm" data-codex-model-action="${m.enabled === false ? 'enable' : 'disable'}" data-model-id="${esc(m.id)}">${m.enabled === false ? 'Enable' : 'Disable'}</button>`;
@@ -964,7 +964,9 @@ function initEndpointForm() {
     const cliAvailable = !!data?.cli_available;
     codexProviderStatus = data || null;
     const totalCount = Array.isArray(data?.models) ? data.models.length : 0;
-    const shouldShowCard = !!data?.connector_enabled || totalCount > 0;
+    const shouldShowCard = disabled
+      ? totalCount > 0
+      : !!data?.connector_enabled || totalCount > 0 || authenticated || signInRequired || cliAvailable;
     if (codexCard) codexCard.style.display = shouldShowCard ? 'flex' : 'none';
 
     codexStatusEl.textContent = _codexStatusLabel(status);
@@ -974,8 +976,8 @@ function initEndpointForm() {
     const streaming = data?.streaming_supported === true;
     const enabledCount = enabledModels.length;
     let details = streaming
-      ? 'Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
-      : 'One-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
+      ? 'Chat picker uses the Codex CLI JSON event stream when available. Stateless. Codex connector uses Codex CLI auth. Not added as a normal API endpoint.'
+      : 'One-shot fallback only, stateless. Codex connector uses Codex CLI auth. Not added as a normal API endpoint.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Signed out. Sign in with Codex / ChatGPT before running provider tests or showing it in the chat picker.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
@@ -1000,7 +1002,7 @@ function initEndpointForm() {
     }
     if (codexSummaryEl) {
       const pickerState = available ? 'Visible in the chat model picker once at least one enabled model is available.' : 'Hidden from the chat model picker until at least one enabled model is available.';
-      codexSummaryEl.textContent = `${pickerState} Uses Codex CLI auth; no API key is stored.`;
+      codexSummaryEl.textContent = `${pickerState} Codex connector uses Codex CLI auth; no API key is stored.`;
     }
 
     if (codexModelEl) {
@@ -1024,7 +1026,7 @@ function initEndpointForm() {
     }
     if (codexResetBtn) codexResetBtn.disabled = disabled;
     if (codexAddModelBtn) codexAddModelBtn.disabled = disabled;
-    if (codexRemoveConnectorBtn) codexRemoveConnectorBtn.disabled = disabled || totalCount === 0;
+    if (codexRemoveConnectorBtn) codexRemoveConnectorBtn.disabled = disabled || !data?.connector_enabled;
     _renderCodexModels(data || {});
   }
 
@@ -1261,7 +1263,7 @@ function initEndpointForm() {
       if (codexCard) codexCard.style.display = 'flex';
       _setCodexOpen(true);
       _focusCodexProviderCard();
-      _setCodexMsg('Codex connector added. Add a recommended model or a custom model ID below.', 'admin-success');
+      _setCodexMsg('Codex connector added. Add a selected model or a custom model ID below.', 'admin-success');
       return true;
     } catch (e) {
       _setCodexMsg('Could not add Codex connector: ' + (e?.message || 'request failed'), 'admin-error');

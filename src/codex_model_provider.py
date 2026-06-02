@@ -552,13 +552,8 @@ class CodexCliCapabilities:
                 raise ValueError("Codex CLI model selection is not supported")
             args.extend([self.model_flag, selected_model])
         selected_effort = str(reasoning_effort or "").strip().lower()
-        if selected_effort and self.reasoning_flag:
-            if not self.reasoning_levels:
-                pass
-            elif selected_effort in self.reasoning_levels:
-                args.extend([self.reasoning_flag, selected_effort])
-            else:
-                raise ValueError("Codex CLI reasoning effort selection is not supported")
+        if selected_effort and self.reasoning_flag and selected_effort in self.reasoning_levels:
+            args.extend([self.reasoning_flag, selected_effort])
         if self.skip_git_repo_check_flag:
             args.append(self.skip_git_repo_check_flag)
         if json_output:

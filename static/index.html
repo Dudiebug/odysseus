@@ -2043,7 +2043,7 @@
                   <option value="https://api.anthropic.com" data-logo="anthropic">Anthropic</option>
                   <option value="https://api.deepseek.com/v1" data-logo="deepseek" selected>DeepSeek</option>
                   <option value="https://api.openai.com/v1" data-logo="openai">OpenAI</option>
-                  <option value="__codex_cli__" data-logo="openai">Codex / ChatGPT (Experimental)</option>
+                  <option value="__codex_cli__" data-logo="openai">Codex / ChatGPT</option>
                   <option value="https://openrouter.ai/api/v1" data-logo="openrouter">OpenRouter</option>
                   <option value="https://ollama.com/api" data-logo="ollama">Ollama Cloud</option>
                   <option value="https://api.groq.com/openai/v1" data-logo="groq">Groq</option>
@@ -2088,11 +2088,10 @@
                   <div style="flex:1;min-width:0;">
                     <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                       <span>Codex / ChatGPT</span>
-                      <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
                       <span style="font-size:10px;opacity:0.4;">Click to configure</span>
                     </div>
                     <div id="adm-codexProviderSummary" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
-                      Uses Codex CLI auth. Experimental chat model picker entry.
+                      Codex connector uses Codex CLI auth. Chat model picker entry.
                     </div>
                   </div>
                   <div style="display:flex;gap:6px;align-items:center;">
@@ -2100,10 +2099,10 @@
                     <svg id="adm-codexProviderChevron" class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>
                   </div>
                 </div>
-                <div id="adm-codexProviderBody" style="display:none;flex-direction:column;gap:8px;">
-                  <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
-                    Experimental, one-shot only, stateless provider using Codex CLI auth.
-                  </div>
+                  <div id="adm-codexProviderBody" style="display:none;flex-direction:column;gap:8px;">
+                    <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
+                    One-shot only, stateless provider using Codex CLI auth.
+                    </div>
                   <div id="adm-codexProviderCapabilities" class="admin-ep-detail" style="white-space:normal;line-height:1.35;"></div>
                   <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
                   <div id="adm-codexProviderModels" class="admin-ep-detail" style="white-space:normal;"></div>

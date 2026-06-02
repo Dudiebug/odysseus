@@ -1488,5 +1488,5 @@ def test_admin_source_keeps_codex_setup_reachable_when_provider_selected():
     source = (REPO_ROOT / "static" / "js" / "admin.js").read_text(encoding="utf-8")
 
     assert "fetch('/api/codex-model-provider/connector'" in source
-    assert "const shouldShowCard = !!data?.connector_enabled || totalCount > 0;" in source
-    assert "msg.textContent = 'Added Codex connector';" in source
+    assert "const shouldShowCard = disabled" in source
+    assert "Codex connector added. Add a selected model or a custom model ID below." in source
