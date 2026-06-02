@@ -157,6 +157,13 @@ Options:
 """
 
 CODEX_OLD_EXEC_HELP = "Usage: codex exec --sandbox <MODE> --ask-for-approval <POLICY> --json --model <MODEL>"
+CODEX_THINKING_TOGGLE_HELP = """Usage: codex exec [OPTIONS] [PROMPT]
+
+Options:
+  -s, --sandbox <SANDBOX_MODE>
+  --json
+  --thinking
+"""
 
 
 async def _codex_help_runner(args, timeout, cwd=None, env=None, exec_help=CODEX_0135_EXEC_HELP):
@@ -727,6 +734,66 @@ def test_status_available_with_current_cli_help(monkeypatch):
     assert out["cli_capabilities"]["streaming_supported"] is True
     assert out["cli_capabilities"]["skip_git_repo_check_supported"] is False
     assert out["cli_capabilities"]["sandbox_mode"] == "read-only"
+    assert out["thinking_supported"] is False
+    assert out["thinking_effort_levels"] == []
+    assert out["thinking_activity_supported"] is False
+
+
+def test_status_does_not_advertise_thinking_from_toggle_only_help(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_THINKING_TOGGLE_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    provider = CodexModelProvider(lambda: svc, chat_adapter=adapter)
+
+    out = run(provider.status())
+
+    assert out["status"] == "available"
+    assert out["cli_capabilities"]["reasoning_effort_supported"] is False
+    assert out["cli_capabilities"]["reasoning_effort_levels"] == []
+    assert out["thinking_supported"] is False
+    assert out["thinking_effort_levels"] == []
+
+
+def test_adapter_ignores_unsupported_reasoning_effort(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_THINKING_TOGGLE_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete(
+        [{"role": "user", "content": "Say ok"}],
+        reasoning_effort="low",
+    ))
+
+    assert out["ok"] is True
+    assert out["reasoning_effort"] is None
+    assert "--thinking" not in calls[-1]
 
 
 def test_adapter_streams_json_events_with_safe_args(monkeypatch):

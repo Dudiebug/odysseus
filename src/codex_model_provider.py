@@ -70,6 +70,7 @@ _BASE_LIMITATIONS = [
     "Stateless: session/resume is not implemented.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
     "The adapter requires Codex CLI sandbox support and runs with read-only sandbox mode.",
+    "Thinking controls stay hidden unless the CLI explicitly advertises supported reasoning levels.",
 ]
 
 _APPROVAL_FLAGS = ("--ask-for-approval", "--approval-policy", "--approval")
@@ -77,7 +78,7 @@ _DANGEROUS_FLAGS = ("--dangerously-bypass-approvals-and-sandbox", "--yolo")
 _SKIP_GIT_REPO_CHECK_FLAG = "--skip-git-repo-check"
 _JSON_OUTPUT_FLAG = "--json"
 _MODEL_FLAGS = ("--model", "-m")
-_REASONING_FLAGS = ("--reasoning-effort", "--effort", "--thinking", "--thinking-level")
+_REASONING_FLAGS = ("--reasoning-effort", "--effort", "--thinking-level")
 _REASONING_LEVELS = ("low", "medium", "high", "maximum")
 _STREAM_CONTAINER_KEYS = ("message", "item", "data", "response")
 _STREAM_NESTED_KEYS = (*_STREAM_CONTAINER_KEYS, "output")
@@ -108,7 +109,7 @@ def codex_model_provider_enabled() -> bool:
     return _truthy(os.getenv(CODEX_MODEL_PROVIDER_FLAG, "false"))
 
 
-def is_codex_model_selection(endpoint_url: str | None, model: str | None = None) -> bool:
+def is_codex_model_selection(endpoint_url: str | None, _model: str | None = None) -> bool:
     return (endpoint_url or "").strip() == CODEX_EXPERIMENTAL_ENDPOINT_URL
 
 
@@ -165,6 +166,28 @@ def _recommended_model_meta(model_id: str) -> dict[str, Any]:
     }
 
 
+def _selected_model_entry(
+    model_id: str,
+    *,
+    enabled: bool = True,
+    hidden: bool = False,
+    thinking_effort: str | None = None,
+    source: str | None = None,
+    label: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    meta = _recommended_model_meta(model_id)
+    return {
+        "id": model_id,
+        "label": label or meta["label"],
+        "description": description or meta["description"],
+        "source": source or meta["source"],
+        "enabled": enabled,
+        "hidden": hidden,
+        "thinking_effort": thinking_effort,
+    }
+
+
 def _sanitize_selected_model_entry(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         value = {"id": value}
@@ -178,15 +201,15 @@ def _sanitize_selected_model_entry(value: Any) -> dict[str, Any] | None:
     source = "recommended" if source in {"recommended", "codex_cli"} and model_id in _CODEX_RECOMMENDED_BY_ID else "custom"
     label = _sanitize_optional_text(value.get("label")) or recommended["label"]
     description = _sanitize_optional_text(value.get("description")) or recommended["description"]
-    return {
-        "id": model_id,
-        "label": label,
-        "description": description,
-        "source": source,
-        "enabled": bool(value.get("enabled", True)),
-        "hidden": bool(value.get("hidden", False)),
-        "thinking_effort": _sanitize_thinking_effort(value.get("thinking_effort")),
-    }
+    return _selected_model_entry(
+        model_id,
+        enabled=bool(value.get("enabled", True)),
+        hidden=bool(value.get("hidden", False)),
+        thinking_effort=_sanitize_thinking_effort(value.get("thinking_effort")),
+        source=source,
+        label=label,
+        description=description,
+    )
 
 
 def _normalize_selected_models(values: Any) -> list[dict[str, Any]]:
@@ -211,16 +234,11 @@ def _legacy_selected_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     disabled = set(_unique_model_ids(cfg.get("disabled_models")))
     out: list[dict[str, Any]] = []
     for model_id in manual:
-        meta = _recommended_model_meta(model_id)
-        out.append({
-            "id": model_id,
-            "label": meta["label"],
-            "description": meta["description"],
-            "source": meta["source"],
-            "enabled": model_id not in disabled,
-            "hidden": model_id in hidden,
-            "thinking_effort": None,
-        })
+        out.append(_selected_model_entry(
+            model_id,
+            enabled=model_id not in disabled,
+            hidden=model_id in hidden,
+        ))
     return out
 
 
@@ -313,16 +331,7 @@ def update_codex_model_config(
             item["hidden"] = False
             item["enabled"] = True
         else:
-            meta = _recommended_model_meta(model_id)
-            selected.append({
-                "id": model_id,
-                "label": meta["label"],
-                "description": meta["description"],
-                "source": meta["source"],
-                "enabled": True,
-                "hidden": False,
-                "thinking_effort": None,
-            })
+            selected.append(_selected_model_entry(model_id))
         cfg["connector_enabled"] = True
 
     model_id = _sanitize_model_id(remove_model)
@@ -485,6 +494,12 @@ class CodexCliCapabilities:
             out.append("Codex CLI JSON event streaming is available for chat streaming.")
         else:
             out.append("Streaming is not available because Codex CLI JSON event output is not advertised.")
+        if self.reasoning_flag and self.reasoning_levels:
+            out.append(
+                "Codex CLI advertises reasoning-effort levels, but Odysseus only exposes them when the CLI makes the supported levels explicit."
+            )
+        else:
+            out.append("Thinking controls are not advertised because this Codex CLI did not expose explicit supported levels.")
         if self.approval_flag:
             out.append(f"Codex CLI advertises {self.approval_flag}, but this provider does not pass approval flags.")
         else:
@@ -511,7 +526,7 @@ class CodexCliCapabilities:
             "streaming_supported": self.streaming_supported,
             "model_flag_supported": self.supports_model,
             "model_flag": self.model_flag,
-            "reasoning_effort_supported": bool(self.reasoning_flag),
+            "reasoning_effort_supported": bool(self.reasoning_flag and self.reasoning_levels),
             "reasoning_effort_flag": self.reasoning_flag,
             "reasoning_effort_levels": list(self.reasoning_levels),
             "dangerous_flags_advertised": list(self.dangerous_flags),
@@ -537,10 +552,13 @@ class CodexCliCapabilities:
                 raise ValueError("Codex CLI model selection is not supported")
             args.extend([self.model_flag, selected_model])
         selected_effort = str(reasoning_effort or "").strip().lower()
-        if selected_effort:
-            if not self.reasoning_flag or selected_effort not in self.reasoning_levels:
+        if selected_effort and self.reasoning_flag:
+            if not self.reasoning_levels:
+                pass
+            elif selected_effort in self.reasoning_levels:
+                args.extend([self.reasoning_flag, selected_effort])
+            else:
                 raise ValueError("Codex CLI reasoning effort selection is not supported")
-            args.extend([self.reasoning_flag, selected_effort])
         if self.skip_git_repo_check_flag:
             args.append(self.skip_git_repo_check_flag)
         if json_output:
@@ -588,11 +606,15 @@ def _detect_reasoning_flag(help_text: str) -> str | None:
 def _detect_reasoning_levels(help_text: str, flag: str | None) -> tuple[str, ...]:
     if not flag:
         return ()
-    text = help_text.lower()
-    found = [level for level in _REASONING_LEVELS if level in text]
-    if found:
-        return tuple(found)
-    return ("low", "medium", "high")
+    found: list[str] = []
+    for line in (help_text or "").splitlines():
+        if flag not in line:
+            continue
+        lowered = line.lower()
+        for level in _REASONING_LEVELS:
+            if re.search(rf"\b{re.escape(level)}\b", lowered) and level not in found:
+                found.append(level)
+    return tuple(found)
 
 
 def _detect_cli_capabilities_from_help(
@@ -792,7 +814,13 @@ class CodexCliChatAdapter:
             "message": message,
             "duration_ms": duration_ms,
             "model": model or CODEX_EXPERIMENTAL_MODEL_ID,
-            "reasoning_effort": reasoning_effort if capabilities.reasoning_flag else None,
+            "reasoning_effort": (
+                reasoning_effort
+                if capabilities.reasoning_flag
+                and capabilities.reasoning_levels
+                and reasoning_effort in capabilities.reasoning_levels
+                else None
+            ),
             "limitations": capabilities.limitations(),
             "cli_capabilities": capabilities.to_public_dict(),
             "streaming_supported": capabilities.streaming_supported,
@@ -1477,9 +1505,9 @@ class CodexModelProvider:
                 base["cli_capabilities"] = chat_available.get("cli_capabilities") or {}
                 base["model_discovery"] = chat_available.get("model_discovery") or {"source": "manual"}
                 cap = base["cli_capabilities"]
-                base["thinking_supported"] = bool(cap.get("reasoning_effort_supported"))
+                base["thinking_supported"] = bool(cap.get("reasoning_effort_supported")) and bool(cap.get("reasoning_effort_levels"))
                 base["thinking_effort_levels"] = cap.get("reasoning_effort_levels") or []
-                base["thinking_activity_supported"] = bool(chat_available.get("streaming_supported"))
+                base["thinking_activity_supported"] = False
 
         for item in cfg["selected_models"]:
             models.append({
