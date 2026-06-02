@@ -2104,11 +2104,20 @@
                   <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
                     Experimental, one-shot only, stateless provider using Codex CLI auth.
                   </div>
+                  <div id="adm-codexProviderCapabilities" class="admin-ep-detail" style="white-space:normal;line-height:1.35;"></div>
                   <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
+                  <div id="adm-codexProviderModels" class="admin-ep-detail" style="white-space:normal;"></div>
+                  <div class="adm-codex-model-add" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    <input id="adm-codexManualModelId" type="text" placeholder="Manual Codex model ID" style="min-width:220px;flex:1;">
+                    <button type="button" class="admin-btn-sm" id="adm-codexAddModelBtn">Add Model</button>
+                  </div>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                     <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
                     <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexStreamTestBtn">Stream Test</button>
                     <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexSignOutBtn" style="opacity:0.75;">Sign out</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexResetBtn" style="opacity:0.75;">Reset</button>
                   </div>
                   <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
                 </div>

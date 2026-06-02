@@ -354,7 +354,12 @@ def test_api_models_includes_codex_when_feature_enabled_and_available(monkeypatc
     monkeypatch.setattr(
         codex_model_provider,
         "codex_model_list_item_if_available",
-        lambda: codex_model_provider.codex_model_list_item(),
+        lambda: codex_model_provider.codex_model_list_item([{
+            "id": "gpt-5.2-codex",
+            "display": "gpt-5.2-codex",
+            "enabled": True,
+            "streaming_supported": True,
+        }]),
     )
 
     out = _api_models_endpoint()(_request(), refresh=True)
@@ -364,7 +369,7 @@ def test_api_models_includes_codex_when_feature_enabled_and_available(monkeypatc
         if item.get("url") == CODEX_EXPERIMENTAL_ENDPOINT_URL
     ]
     assert len(codex_items) == 1
-    assert codex_items[0]["models"] == [CODEX_EXPERIMENTAL_MODEL_ID]
+    assert codex_items[0]["models"] == ["gpt-5.2-codex"]
 
 
 def test_api_models_excludes_codex_when_feature_enabled_but_signed_out(monkeypatch):
@@ -378,3 +383,32 @@ def test_api_models_excludes_codex_when_feature_enabled_but_signed_out(monkeypat
     models = [model for item in out["items"] for model in item.get("models", [])]
     assert CODEX_EXPERIMENTAL_ENDPOINT_URL not in urls
     assert CODEX_EXPERIMENTAL_MODEL_ID not in models
+
+
+def test_api_models_does_not_cache_codex_availability_after_sign_out(monkeypatch):
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _EmptyDb())
+    monkeypatch.setenv(codex_model_provider.CODEX_MODEL_PROVIDER_FLAG, "true")
+    available = {"value": True}
+
+    def codex_item_if_available():
+        if available["value"]:
+            return codex_model_provider.codex_model_list_item([{
+                "id": "gpt-5.2-codex",
+                "display": "gpt-5.2-codex",
+                "enabled": True,
+            }])
+        return None
+
+    monkeypatch.setattr(
+        codex_model_provider,
+        "codex_model_list_item_if_available",
+        codex_item_if_available,
+    )
+    endpoint = _api_models_endpoint()
+
+    first = endpoint(_request(), refresh=True)
+    available["value"] = False
+    second = endpoint(_request(), refresh=False)
+
+    assert CODEX_EXPERIMENTAL_ENDPOINT_URL in [item.get("url") for item in first["items"]]
+    assert CODEX_EXPERIMENTAL_ENDPOINT_URL not in [item.get("url") for item in second["items"]]

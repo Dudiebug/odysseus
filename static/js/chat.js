@@ -1150,8 +1150,8 @@ import createResearchSynapse from './researchSynapse.js';
           // Don't show beforeThink text during streaming — it'll appear in the final render
           // This prevents the "split into two" duplication
           contentEl.innerHTML =
-            '<div class="thinking-section"><div class="thinking-header"><div class="thinking-header-left">Thinking' +
-            (lines > 1 ? ` (${lines} lines)` : '') + '</div></div></div>';
+            '<div class="thinking-section"><div class="thinking-header"><div class="thinking-header-left"><span>Reasoning activity' +
+            (lines > 1 ? ` (${lines} hidden lines)` : '') + '</span></div></div></div>';
           contentEl._prevTextLen = 0;
           uiModule.scrollHistory();
           return;
@@ -1463,13 +1463,13 @@ import createResearchSynapse from './researchSynapse.js';
                   thinkContent.innerHTML = `
                     <div class="thinking-section">
                       <div class="thinking-header" data-thinking-id="${_liveThinkDomId}">
-                        <div class="thinking-header-left"><span class="live-think-header-text">Thinking\u2026</span></div>
+                        <div class="thinking-header-left"><span class="live-think-header-text" data-label="reasoning activity">Reasoning activity...</span></div>
                         <span class="live-think-spinner-slot" style="flex-shrink:0;margin-left:auto;"></span>
                         <span class="live-think-timer" style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;margin-left:6px;margin-right:5px;"></span>
                         <span class="thinking-toggle live-think-toggle" id="${_liveThinkDomId}-toggle"></span>
                       </div>
                       <div class="thinking-content" id="${_liveThinkDomId}">
-                        <div class="thinking-content-inner live-think-inner"></div>
+                        <div class="thinking-content-inner live-think-inner is-redacted">Reasoning activity is being captured. Raw hidden chain-of-thought is not displayed.</div>
                       </div>
                     </div>`;
                   _liveThinkSection = thinkContent.querySelector('.thinking-section');
@@ -1503,7 +1503,10 @@ import createResearchSynapse from './researchSynapse.js';
                     // Extract raw thinking text (strip all <think>/<thinking> open/close tags and prefixes)
                     var thinkText = roundText.replace(/<\/?think(?:ing)?>/gi, '');
                     thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
+                    var _hiddenLines = thinkText.trim() ? thinkText.trim().split('\n').length : 0;
+                    _liveThinkInner.textContent = _hiddenLines > 1
+                      ? 'Reasoning activity captured (' + _hiddenLines + ' hidden lines). Raw hidden chain-of-thought is not displayed.'
+                      : 'Reasoning activity is being captured. Raw hidden chain-of-thought is not displayed.';
                     // Keep thinking box scrolled to bottom
                     var thinkBox = _liveThinkInner.closest('.thinking-content');
                     if (thinkBox) thinkBox.scrollTop = thinkBox.scrollHeight;

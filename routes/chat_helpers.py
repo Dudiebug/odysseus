@@ -129,7 +129,6 @@ async def auto_name_session(session_manager, sess):
     """Generate a short title for a session from its first user message."""
     try:
         from src.llm_core import llm_call_async
-        from src.task_endpoint import resolve_task_endpoint
 
         # Find first user message
         first_msg = ""
@@ -147,9 +146,13 @@ async def auto_name_session(session_manager, sess):
         if not first_msg:
             return
 
-        t_url, t_model, t_headers = resolve_task_endpoint(
+        resolved = _resolve_http_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers,
         )
+        if not resolved:
+            logger.debug("Skipping auto-name for synthetic/non-HTTP model session %s", sess.id)
+            return
+        t_url, t_model, t_headers = resolved
 
         # max_tokens big enough that reasoning models (Minimax M2,
         # DeepSeek R1, QwQ, etc.) have headroom for <think>…</think>
@@ -181,6 +184,18 @@ async def auto_name_session(session_manager, sess):
     except Exception as e:
         import traceback
         logger.error(f"Auto-name failed for {sess.id}: {e}\n{traceback.format_exc()}")
+
+
+def _resolve_http_task_endpoint(fallback_url=None, fallback_model=None, fallback_headers=None):
+    """Resolve the background-task endpoint and reject synthetic model providers."""
+    from src.task_endpoint import resolve_task_endpoint
+
+    url, model, headers = resolve_task_endpoint(fallback_url, fallback_model, fallback_headers)
+    if not url or not model:
+        return None
+    if is_codex_model_selection(url, model):
+        return None
+    return url, model, headers
 
 
 def try_fallback_endpoint(sess, session_id: str) -> dict | None:
@@ -748,14 +763,15 @@ def run_post_response_tasks(
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
     if not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
         from services.memory.memory_extractor import extract_and_store
-        from src.task_endpoint import resolve_task_endpoint
-        t_url, t_model, t_headers = resolve_task_endpoint(
+        resolved = _resolve_http_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers,
         )
-        asyncio.create_task(extract_and_store(
-            sess, memory_manager, memory_vector,
-            t_url, t_model, t_headers,
-        ))
+        if resolved:
+            t_url, t_model, t_headers = resolved
+            asyncio.create_task(extract_and_store(
+                sess, memory_manager, memory_vector,
+                t_url, t_model, t_headers,
+            ))
 
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar
@@ -785,17 +801,18 @@ def run_post_response_tasks(
             )
         else:
             from services.memory.skill_extractor import maybe_extract_skill
-            from src.task_endpoint import resolve_task_endpoint
-            s_url, s_model, s_headers = resolve_task_endpoint(
+            resolved = _resolve_http_task_endpoint(
                 sess.endpoint_url, sess.model, sess.headers,
             )
-            logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
-            asyncio.create_task(maybe_extract_skill(
-                sess, skills_manager,
-                s_url, s_model, s_headers,
-                agent_rounds, agent_tool_calls,
-                owner=owner,
-            ))
+            if resolved:
+                s_url, s_model, s_headers = resolved
+                logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
+                asyncio.create_task(maybe_extract_skill(
+                    sess, skills_manager,
+                    s_url, s_model, s_headers,
+                    agent_rounds, agent_tool_calls,
+                    owner=owner,
+                ))
 
     # Token accumulation
     if last_metrics:

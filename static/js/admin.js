@@ -562,17 +562,19 @@ async function loadEndpoints() {
             const hiddenSet = new Set(sortedModels.filter(m => m.is_hidden).map(m => m.id));
             const showSearch = sortedModels.length >= 8;
             panel.innerHTML = `<div class="mcp-tools-header">
-              <span>Models</span>
+              <span>Models <span class="adm-model-source-note">discovered from provider</span></span>
               <span style="display:flex;gap:8px;align-items:center;">
-                <span class="mcp-tools-count">${sortedModels.length - hiddenSet.size}/${sortedModels.length} enabled</span>
-                <a href="#" data-ep-select-all="${epId}">All</a>
-                <a href="#" data-ep-select-none="${epId}">None</a>
+                <span class="mcp-tools-count">${sortedModels.length - hiddenSet.size}/${sortedModels.length} visible</span>
+                <a href="#" data-ep-select-all="${epId}">Restore all</a>
+                <a href="#" data-ep-select-none="${epId}">Hide all</a>
               </span>
             </div>${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
-              `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
+              `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row${m.is_hidden ? ' adm-model-row-hidden' : ''}">
                 <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
                 <span class="adm-check-dot" aria-hidden="true"></span>
                 <span>${esc(m.display)}</span>
+                <span class="adm-model-source-badge">${m.source === 'manual' ? 'manual' : 'discovered'}</span>
+                <span class="adm-model-hide-label">${m.is_hidden ? 'hidden - restore' : 'visible - hide'}</span>
               </label>`
             ).join('') + '</div>';
             const filterRows = (q) => {
@@ -613,6 +615,12 @@ async function _saveEpModelState(epId, panel) {
   const hidden = [];
   panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
     if (!cb.checked) hidden.push(cb.dataset.epModelId);
+    const row = cb.closest('[data-ep-model-row]');
+    if (row) {
+      row.classList.toggle('adm-model-row-hidden', !cb.checked);
+      const label = row.querySelector('.adm-model-hide-label');
+      if (label) label.textContent = cb.checked ? 'visible - hide' : 'hidden - restore';
+    }
   });
   const total = panel.querySelectorAll('input[type=checkbox]').length;
   try {
@@ -623,7 +631,7 @@ async function _saveEpModelState(epId, panel) {
       body: JSON.stringify({ hidden }),
     });
     const countLabel = panel.querySelector('.mcp-tools-count');
-    if (countLabel) countLabel.textContent = `${total - hidden.length}/${total} enabled`;
+    if (countLabel) countLabel.textContent = `${total - hidden.length}/${total} visible`;
     const row = panel.closest('[data-adm-ep-id]');
     if (row) {
       const badge = row.querySelector('.admin-badge');
@@ -778,14 +786,21 @@ function initEndpointForm() {
   const codexStatusEl = el('adm-codexProviderStatus');
   const codexDetailsEl = el('adm-codexProviderDetails');
   const codexSummaryEl = el('adm-codexProviderSummary');
+  const codexCapabilitiesEl = el('adm-codexProviderCapabilities');
   const codexModelEl = el('adm-codexProviderModel');
+  const codexModelsEl = el('adm-codexProviderModels');
+  const codexManualModelInput = el('adm-codexManualModelId');
+  const codexAddModelBtn = el('adm-codexAddModelBtn');
   const codexMsgEl = el('adm-codexProviderMsg');
   const codexHeader = el('adm-codexProviderHeader');
   const codexBody = el('adm-codexProviderBody');
   const codexChevron = el('adm-codexProviderChevron');
   const codexSignInBtn = el('adm-codexSignInBtn');
   const codexTestBtn = el('adm-codexTestBtn');
+  const codexStreamTestBtn = el('adm-codexStreamTestBtn');
   const codexRefreshBtn = el('adm-codexRefreshBtn');
+  const codexSignOutBtn = el('adm-codexSignOutBtn');
+  const codexResetBtn = el('adm-codexResetBtn');
   let codexProviderStatus = null;
   let codexOpen = false;
 
@@ -808,7 +823,11 @@ function initEndpointForm() {
     const apiKey = el('adm-epApiKey');
     const type = el('adm-epType');
     const apiTestBtn = el('adm-epApiTestBtn');
+    const apiCancelTestBtn = el('adm-epApiCancelTestBtn');
     const addBtn = el('adm-epAddBtn');
+    const apiForm = urlInput ? urlInput.closest('.admin-model-form') : null;
+    if (picker) picker.classList.toggle('adm-provider-codex-selected', isCodex);
+    if (apiForm) apiForm.classList.toggle('adm-provider-codex-selected', isCodex);
     if (urlInput) {
       urlInput.disabled = isCodex;
       urlInput.placeholder = isCodex ? 'Codex uses CLI auth, not an API endpoint URL' : 'Base URL or pick provider';
@@ -821,10 +840,11 @@ function initEndpointForm() {
     }
     if (type) type.disabled = isCodex;
     if (apiTestBtn) apiTestBtn.disabled = isCodex;
+    if (apiCancelTestBtn) apiCancelTestBtn.disabled = isCodex;
     if (addBtn) addBtn.disabled = isCodex;
     if (isCodex) {
       _setCodexOpen(true);
-      _setCodexMsg('Selected in the provider dropdown. Use this experimental card; Codex is not added as a normal endpoint yet.', '');
+      _setCodexMsg('Selected in the provider dropdown. Use the Codex card below; it is not added as a normal endpoint.', '');
     }
   }
 
@@ -852,13 +872,52 @@ function initEndpointForm() {
     return 'Unavailable';
   }
 
+  function _codexEnabledModels(data) {
+    return (Array.isArray(data?.models) ? data.models : []).filter(m => m && m.id && m.enabled !== false && !m.hidden);
+  }
+
+  function _renderCodexModels(data) {
+    if (!codexModelsEl) return;
+    const models = Array.isArray(data?.models) ? data.models : [];
+    const discovery = data?.model_discovery?.source || 'none';
+    if (!models.length) {
+      const reason = discovery === 'manual'
+        ? 'This Codex CLI exposes a model flag but no model list. Add exact model IDs manually.'
+        : 'No Codex models are available yet. Add a manual model ID if this CLI cannot list models.';
+      codexModelsEl.innerHTML = `<div class="adm-codex-model-empty">${esc(reason)}</div>`;
+      return;
+    }
+    codexModelsEl.innerHTML = `<div class="mcp-tools-header">
+      <span>Codex models <span class="adm-model-source-note">${esc(discovery)}</span></span>
+      <span class="mcp-tools-count">${_codexEnabledModels(data).length}/${models.length} enabled</span>
+    </div><div class="mcp-tools-list adm-codex-model-list">` + models.map(m => {
+      const state = m.hidden ? 'hidden' : (m.enabled === false ? 'disabled' : 'enabled');
+      const source = m.source === 'manual' ? 'manual' : 'discovered';
+      const primaryAction = m.hidden
+        ? `<button type="button" class="admin-btn-sm" data-codex-model-action="restore" data-model-id="${esc(m.id)}">Restore</button>`
+        : `<button type="button" class="admin-btn-sm" data-codex-model-action="${m.enabled === false ? 'enable' : 'disable'}" data-model-id="${esc(m.id)}">${m.enabled === false ? 'Enable' : 'Disable'}</button>`;
+      const hideAction = !m.hidden
+        ? `<button type="button" class="admin-btn-sm" data-codex-model-action="hide" data-model-id="${esc(m.id)}" style="opacity:0.75;">Hide</button>`
+        : '';
+      return `<div class="adm-model-row adm-codex-model-row adm-model-row-${state}" title="${esc(m.id)}">
+        <span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;"><code>${esc(m.id)}</code></span>
+        <span class="adm-model-source-badge">${esc(source)}</span>
+        <span class="adm-model-hide-label">${esc(state)}</span>
+        ${primaryAction}${hideAction}
+      </div>`;
+    }).join('') + '</div>';
+  }
+
   function _renderCodexProviderStatus(data) {
     if (!codexCard || !codexStatusEl || !codexDetailsEl) return;
     const status = data && data.status ? data.status : 'unavailable';
-    const model = Array.isArray(data?.models) && data.models.length ? data.models[0] : null;
+    const enabledModels = _codexEnabledModels(data);
+    const model = enabledModels.length ? enabledModels[0] : null;
     const available = status === 'available' && data.chat_supported === true && !!model;
     const signInRequired = status === 'sign_in_required';
     const disabled = status === 'disabled' || data?.feature_enabled === false;
+    const authenticated = !!data?.authenticated;
+    const cliAvailable = !!data?.cli_available;
     codexProviderStatus = data || null;
 
     codexStatusEl.textContent = _codexStatusLabel(status);
@@ -866,16 +925,31 @@ function initEndpointForm() {
     codexStatusEl.style.color = available ? 'var(--green,#50fa7b)' : '';
 
     const streaming = data?.streaming_supported === true;
+    const enabledCount = enabledModels.length;
+    const totalCount = Array.isArray(data?.models) ? data.models.length : 0;
     let details = streaming
       ? 'Experimental. Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
       : 'Experimental, one-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
-    else if (signInRequired) details += ' Sign in with Codex / ChatGPT before running the provider test.';
+    else if (signInRequired) details += ' Signed out. Sign in with Codex / ChatGPT before running provider tests or showing it in the chat picker.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
     else if (status === 'cli_unavailable') details += ' Install or expose the Codex CLI in this runtime before testing.';
     codexDetailsEl.textContent = details;
+    if (codexCapabilitiesEl) {
+      const authText = authenticated ? 'signed in' : 'signed out';
+      const streamText = streaming ? 'yes' : 'no';
+      const levels = Array.isArray(data?.thinking_effort_levels) ? data.thinking_effort_levels : [];
+      const thinkText = data?.thinking_supported ? `supported (${levels.join(', ') || 'provider default'})` : 'not advertised by CLI';
+      codexCapabilitiesEl.innerHTML = [
+        `CLI: <strong>${cliAvailable ? 'available' : 'unavailable'}</strong>`,
+        `Auth: <strong>${authText}</strong>`,
+        `Models: <strong>${enabledCount}/${totalCount}</strong>`,
+        `Streaming: <strong>${streamText}</strong>`,
+        `Thinking control: <strong>${esc(thinkText)}</strong>`,
+      ].join(' &middot; ');
+    }
     if (codexSummaryEl) {
-      const pickerState = disabled ? 'Hidden from chat picker while disabled.' : 'Visible in the chat model picker as an experimental model.';
+      const pickerState = available ? 'Visible in the chat model picker as an experimental model.' : 'Hidden from the chat model picker until available.';
       codexSummaryEl.textContent = `${pickerState} Uses Codex CLI auth; no API key is stored.`;
     }
 
@@ -889,7 +963,18 @@ function initEndpointForm() {
       }
     }
     if (codexTestBtn) codexTestBtn.disabled = !available;
-    if (codexSignInBtn) codexSignInBtn.disabled = disabled;
+    if (codexStreamTestBtn) codexStreamTestBtn.disabled = !available || !streaming;
+    if (codexSignInBtn) {
+      codexSignInBtn.disabled = disabled || !cliAvailable;
+      codexSignInBtn.style.display = authenticated ? 'none' : '';
+    }
+    if (codexSignOutBtn) {
+      codexSignOutBtn.disabled = disabled || !authenticated;
+      codexSignOutBtn.style.display = authenticated ? '' : 'none';
+    }
+    if (codexResetBtn) codexResetBtn.disabled = disabled;
+    if (codexAddModelBtn) codexAddModelBtn.disabled = disabled;
+    _renderCodexModels(data || {});
   }
 
   async function _refreshCodexProviderStatus() {
@@ -900,6 +985,7 @@ function initEndpointForm() {
       codexStatusEl.style.color = '';
     }
     if (codexTestBtn) codexTestBtn.disabled = true;
+    if (codexStreamTestBtn) codexStreamTestBtn.disabled = true;
     _setCodexMsg('', '');
     try {
       const res = await fetch('/api/codex-model-provider/status', { credentials: 'same-origin' });
@@ -931,8 +1017,9 @@ function initEndpointForm() {
 
   async function _testCodexProviderChat() {
     if (!codexTestBtn) return;
-    const model = Array.isArray(codexProviderStatus?.models) && codexProviderStatus.models.length
-      ? codexProviderStatus.models[0].id
+    const chatModels = _codexEnabledModels(codexProviderStatus);
+    const model = chatModels.length
+      ? chatModels[0].id
       : 'codex-cli/chatgpt-experimental';
     codexTestBtn.disabled = true;
     codexTestBtn.textContent = 'Testing...';
@@ -964,6 +1051,159 @@ function initEndpointForm() {
     if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
   }
 
+  function _readSseEvents(text, onEvent) {
+    const chunks = String(text || '').split(/\n\n+/);
+    chunks.forEach(chunk => {
+      const line = chunk.split(/\n/).find(l => l.startsWith('data:'));
+      if (!line) return;
+      let event = null;
+      try { event = JSON.parse(line.slice(5).trim()); } catch (_) { return; }
+      onEvent(event);
+    });
+  }
+
+  async function _testCodexProviderStream() {
+    if (!codexStreamTestBtn) return;
+    const streamModels = _codexEnabledModels(codexProviderStatus);
+    const model = streamModels.length
+      ? streamModels[0].id
+      : 'codex-cli/chatgpt-experimental';
+    codexStreamTestBtn.disabled = true;
+    codexStreamTestBtn.textContent = 'Streaming...';
+    _setCodexMsg('Running Codex streaming provider test...', '');
+    let buffer = '';
+    let responseText = '';
+    try {
+      const res = await fetch('/api/codex-model-provider/test-chat-stream', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt: 'Reply with exactly: Codex provider stream ok',
+          timeout_seconds: 90,
+        }),
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split(/\n\n+/);
+        buffer = parts.pop() || '';
+        _readSseEvents(parts.join('\n\n'), (event) => {
+          if (event.type === 'delta') responseText += event.delta || '';
+          if (event.type === 'error') throw new Error(event.error || event.status || 'stream error');
+        });
+        if (codexMsgEl && responseText) {
+          codexMsgEl.className = 'admin-success';
+          codexMsgEl.innerHTML = `Streaming response: ${esc(responseText)}`;
+        }
+      }
+      _readSseEvents(buffer, (event) => {
+        if (event.type === 'delta') responseText += event.delta || '';
+      });
+      if (codexMsgEl) {
+        codexMsgEl.className = responseText ? 'admin-success' : 'admin-error';
+        codexMsgEl.innerHTML = responseText ? `Streaming response: ${esc(responseText)}` : 'Stream completed without text.';
+      }
+    } catch (e) {
+      _setCodexMsg('Stream test failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
+    }
+    codexStreamTestBtn.textContent = 'Stream Test';
+    if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
+  }
+
+  async function _signOutCodexProvider() {
+    if (codexSignOutBtn) codexSignOutBtn.disabled = true;
+    _setCodexMsg('Signing out of Codex...', '');
+    try {
+      await fetch('/api/codex-auth/logout', { method: 'POST', credentials: 'same-origin' });
+      await _refreshCodexProviderStatus();
+      await _refreshAfterEndpointChange();
+      _setCodexMsg('Signed out. Codex is hidden from the model picker until you sign in again.', 'admin-success');
+    } catch (_) {
+      _setCodexMsg('Could not sign out of Codex.', 'admin-error');
+      if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
+    }
+  }
+
+  async function _resetCodexProviderUi() {
+    if (codexResetBtn) codexResetBtn.disabled = true;
+    _setCodexMsg('Resetting Codex sign-in state...', '');
+    try {
+      await fetch('/api/codex-auth/cancel', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+      await _refreshCodexProviderStatus();
+      _setCodexMsg('Codex status refreshed. Active device sign-in was canceled if one was running.', 'admin-success');
+    } catch (_) {
+      _setCodexMsg('Could not reset Codex status.', 'admin-error');
+    } finally {
+      if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
+    }
+  }
+
+  async function _updateCodexModel(action, modelId) {
+    if (!modelId) return;
+    _setCodexMsg('Updating Codex model list...', '');
+    try {
+      const res = await fetch('/api/codex-model-provider/models', {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, model_id: modelId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        _setCodexMsg(data.error || 'Could not update Codex model.', 'admin-error');
+        return;
+      }
+      await _refreshCodexProviderStatus();
+      await _refreshAfterEndpointChange();
+      _setCodexMsg('Codex model list updated.', 'admin-success');
+    } catch (e) {
+      _setCodexMsg('Could not update Codex model: ' + (e?.message || 'request failed'), 'admin-error');
+    }
+  }
+
+  async function _addCodexManualModel() {
+    const modelId = (codexManualModelInput?.value || '').trim();
+    if (!modelId) {
+      _setCodexMsg('Enter an exact Codex model ID first.', 'admin-error');
+      return;
+    }
+    if (/\s/.test(modelId)) {
+      _setCodexMsg('Model IDs cannot contain spaces.', 'admin-error');
+      return;
+    }
+    if (codexAddModelBtn) codexAddModelBtn.disabled = true;
+    _setCodexMsg('Adding Codex model...', '');
+    try {
+      const res = await fetch('/api/codex-model-provider/models', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        _setCodexMsg(data.error || 'Could not add Codex model.', 'admin-error');
+        return;
+      }
+      if (codexManualModelInput) codexManualModelInput.value = '';
+      await _refreshCodexProviderStatus();
+      await _refreshAfterEndpointChange();
+      _setCodexMsg('Manual Codex model added.', 'admin-success');
+    } catch (e) {
+      _setCodexMsg('Could not add Codex model: ' + (e?.message || 'request failed'), 'admin-error');
+    } finally {
+      if (codexProviderStatus) _renderCodexProviderStatus(codexProviderStatus);
+    }
+  }
+
   if (codexSignInBtn) {
     codexSignInBtn.addEventListener('click', () => {
       if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open('integrations');
@@ -982,7 +1222,27 @@ function initEndpointForm() {
     });
   }
   if (codexTestBtn) codexTestBtn.addEventListener('click', _testCodexProviderChat);
+  if (codexStreamTestBtn) codexStreamTestBtn.addEventListener('click', _testCodexProviderStream);
   if (codexRefreshBtn) codexRefreshBtn.addEventListener('click', _refreshCodexProviderStatus);
+  if (codexSignOutBtn) codexSignOutBtn.addEventListener('click', _signOutCodexProvider);
+  if (codexResetBtn) codexResetBtn.addEventListener('click', _resetCodexProviderUi);
+  if (codexAddModelBtn) codexAddModelBtn.addEventListener('click', _addCodexManualModel);
+  if (codexManualModelInput) {
+    codexManualModelInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        _addCodexManualModel();
+      }
+    });
+  }
+  if (codexModelsEl) {
+    codexModelsEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-codex-model-action]');
+      if (!btn) return;
+      e.preventDefault();
+      _updateCodexModel(btn.dataset.codexModelAction, btn.dataset.modelId);
+    });
+  }
   _setEndpointProviderControls();
   _refreshCodexProviderStatus();
 

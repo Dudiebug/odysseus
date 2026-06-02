@@ -583,15 +583,22 @@ def setup_model_routes(model_discovery):
                     "offline": True,
                 })
 
+        return {"hosts": [], "items": items}
+
+    def _append_codex_model_item(result: Dict[str, Any]) -> Dict[str, Any]:
+        """Add the dynamic Codex picker item without storing it in /api/models cache."""
+        out = {
+            "hosts": list(result.get("hosts") or []),
+            "items": list(result.get("items") or []),
+        }
         try:
             from src.codex_model_provider import codex_model_list_item_if_available
             codex_item = codex_model_list_item_if_available()
             if codex_item:
-                items.append(codex_item)
+                out["items"].append(codex_item)
         except Exception:
             pass
-
-        return {"hosts": [], "items": items}
+        return out
 
     @router.get("/models")
     def api_models(request: Request, refresh: bool = False):
@@ -629,12 +636,12 @@ def setup_model_routes(model_discovery):
         _cache_key = (owner, _is_admin)
         cache_entry = _models_cache.get(_cache_key)
         if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
-            return cache_entry["data"]
+            return _append_codex_model_item(cache_entry["data"])
         result = _fetch_models(owner=owner, is_admin=_is_admin)
         _models_cache[_cache_key] = {"data": result, "time": now}
         # Kick off background refresh to update caches from live endpoints
         _refresh_caches_bg()
-        return result
+        return _append_codex_model_item(result)
 
     # Brief cache for local-probe results so picker-open doesn't hammer
     # /v1/models every time. 8s TTL — long enough to amortize cost,

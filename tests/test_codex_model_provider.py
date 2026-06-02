@@ -12,6 +12,8 @@ from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_DISPLAY,
     CodexCliChatAdapter,
     CodexModelProvider,
+    load_codex_model_config,
+    update_codex_model_config,
     codex_model_list_item_if_available,
     codex_model_list_item,
     is_codex_model_selection,
@@ -58,9 +60,17 @@ class _FakeAdapter:
             "session_resume_supported": False,
             "tool_execution_allowed": False,
             "limitations": [],
+            "supports_model": True,
+            "discovered_models": ["gpt-5.2-codex"],
+            "model_discovery": {"source": "codex_cli", "command": "models"},
+            "cli_capabilities": {
+                "model_flag_supported": True,
+                "reasoning_effort_supported": False,
+                "reasoning_effort_levels": [],
+            },
         }
 
-    async def complete(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+    async def complete(self, messages, model=None, reasoning_effort=None, timeout_seconds=120, odysseus_session_id=None):
         return {
             "ok": True,
             "status": "ok",
@@ -77,6 +87,7 @@ class _FakeAdapter:
         self,
         messages,
         model=None,
+        reasoning_effort=None,
         timeout_seconds=120,
         odysseus_session_id=None,
         allow_one_shot_fallback=False,
@@ -209,13 +220,44 @@ def test_codex_model_provider_hidden_when_flag_disabled(monkeypatch):
 
 
 def test_codex_model_list_item_is_synthetic_not_db_endpoint():
-    item = codex_model_list_item()
+    item = codex_model_list_item([{
+        "id": "gpt-5.2-codex",
+        "display": "gpt-5.2-codex",
+        "enabled": True,
+        "streaming_supported": True,
+    }])
 
     assert item["url"] == CODEX_EXPERIMENTAL_ENDPOINT_URL
-    assert item["models"] == [CODEX_EXPERIMENTAL_MODEL_ID]
+    assert item["models"] == ["gpt-5.2-codex"]
     assert item["endpoint_id"] is None
     assert item["experimental"] is True
     assert is_codex_model_selection(item["url"], item["models"][0]) is True
+    assert is_codex_model_selection(None, item["models"][0]) is False
+    assert is_codex_model_selection("https://api.openai.com/v1/chat/completions", item["models"][0]) is False
+
+
+def test_codex_manual_model_config_persists_hide_disable_restore(monkeypatch, tmp_path):
+    import src.settings as settings_module
+
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "SETTINGS_FILE", str(settings_file))
+    settings_module._invalidate_caches()
+
+    cfg = update_codex_model_config(add_model="gpt-5.2-codex")
+    assert cfg["manual_models"] == ["gpt-5.2-codex"]
+    assert load_codex_model_config()["manual_models"] == ["gpt-5.2-codex"]
+
+    cfg = update_codex_model_config(disable_model="gpt-5.2-codex")
+    assert cfg["disabled_models"] == ["gpt-5.2-codex"]
+
+    cfg = update_codex_model_config(hide_model="gpt-5.2-codex")
+    assert cfg["hidden_models"] == ["gpt-5.2-codex"]
+    assert cfg["disabled_models"] == []
+
+    cfg = update_codex_model_config(restore_model="gpt-5.2-codex")
+    assert cfg["hidden_models"] == []
+    settings_module._invalidate_caches()
 
 
 def test_codex_model_list_item_if_available_requires_available_status(monkeypatch):
@@ -273,8 +315,8 @@ def test_codex_model_provider_reports_experimental_model_when_authenticated(monk
 
     assert out["status"] == "available"
     assert out["authenticated"] is True
-    assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
-    assert out["models"][0]["display"] == CODEX_EXPERIMENTAL_MODEL_DISPLAY
+    assert out["models"][0]["id"] == "gpt-5.2-codex"
+    assert out["models"][0]["display"] == "gpt-5.2-codex"
     assert out["models"][0]["experimental"] is True
     assert out["chat_supported"] is True
     assert out["streaming_supported"] is False
@@ -422,8 +464,10 @@ def test_adapter_success_from_mocked_subprocess(monkeypatch):
     assert calls[-1][1]
     assert "--sandbox" in exec_args
     assert "read-only" in exec_args
-    assert "--ask-for-approval" in exec_args
-    assert "never" in exec_args
+    assert "--ask-for-approval" not in exec_args
+    assert "--approval-policy" not in exec_args
+    assert "--approval" not in exec_args
+    assert "never" not in exec_args
 
 
 def test_adapter_accepts_current_cli_without_approval_flag(monkeypatch):
@@ -498,6 +542,59 @@ def test_adapter_uses_skip_git_repo_check_when_advertised(monkeypatch):
     assert "--yolo" not in exec_args
 
 
+def test_adapter_passes_custom_model_only_when_model_flag_supported(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_OLD_EXEC_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "codex provider test ok", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "Say ok"}], model="gpt-5.2-codex"))
+
+    assert out["ok"] is True
+    exec_args = calls[-1]
+    assert "--model" in exec_args
+    assert exec_args[exec_args.index("--model") + 1] == "gpt-5.2-codex"
+
+
+def test_adapter_rejects_custom_model_without_model_flag(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    calls = []
+
+    async def runner(args, timeout, cwd=None, env=None):
+        calls.append(args)
+        if args[1:] == ["exec", "--help"]:
+            return 0, CODEX_0135_EXEC_HELP, ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "should not run", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.complete([{"role": "user", "content": "Say ok"}], model="gpt-5.2-codex"))
+
+    assert out["ok"] is False
+    assert out["status"] == "unsupported_option"
+    assert not any(args[1] == "exec" and "--help" not in args for args in calls)
+
+
 def test_adapter_retries_with_skip_git_repo_check_when_trust_error_requires_it(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
     svc = _FakeService({
@@ -545,8 +642,8 @@ def test_status_available_with_current_cli_help(monkeypatch):
     assert out["status"] == "available"
     assert out["chat_supported"] is True
     assert out["streaming_supported"] is True
-    assert out["models"][0]["id"] == CODEX_EXPERIMENTAL_MODEL_ID
-    assert out["models"][0]["streaming_supported"] is True
+    assert out["models"] == []
+    assert out["model_discovery"]["source"] == "none"
     assert out["cli_capabilities"]["sandbox_supported"] is True
     assert out["cli_capabilities"]["approval_control_supported"] is False
     assert out["cli_capabilities"]["json_output_supported"] is True
@@ -774,6 +871,75 @@ def test_normal_chat_routes_use_explicit_codex_branches_before_generic_llm():
     assert "allow_one_shot_fallback=True" in branch_source
 
 
+def test_codex_auto_name_does_not_call_generic_llm(monkeypatch):
+    from routes import chat_helpers
+    import src.task_endpoint as task_endpoint
+    import src.llm_core as llm_core
+
+    monkeypatch.setattr(
+        task_endpoint,
+        "resolve_task_endpoint",
+        lambda fallback_url=None, fallback_model=None, fallback_headers=None: (
+            CODEX_EXPERIMENTAL_ENDPOINT_URL,
+            CODEX_EXPERIMENTAL_MODEL_ID,
+            {},
+        ),
+    )
+
+    async def fail_llm_call(*args, **kwargs):
+        raise AssertionError("auto-name must not POST to odysseus://codex-cli")
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fail_llm_call)
+    sess = SimpleNamespace(
+        id="codex-session",
+        endpoint_url=CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        model=CODEX_EXPERIMENTAL_MODEL_ID,
+        headers={},
+        history=[SimpleNamespace(role="user", content="hello codex")],
+    )
+
+    run(chat_helpers.auto_name_session(SimpleNamespace(update_session_name=lambda *a: None), sess))
+
+
+def test_codex_post_response_skips_generic_background_llm_tasks(monkeypatch):
+    from routes import chat_helpers
+
+    created = []
+    monkeypatch.setattr(chat_helpers, "_resolve_http_task_endpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_helpers.asyncio, "create_task", lambda coro: created.append(coro))
+    sess = SimpleNamespace(
+        id="codex-session",
+        name="Already Named",
+        endpoint_url=CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        model=CODEX_EXPERIMENTAL_MODEL_ID,
+        headers={},
+        history=[
+            SimpleNamespace(role="user", content="one"),
+            SimpleNamespace(role="assistant", content="two"),
+            SimpleNamespace(role="user", content="three"),
+            SimpleNamespace(role="assistant", content="four"),
+        ],
+    )
+
+    chat_helpers.run_post_response_tasks(
+        sess,
+        session_manager=SimpleNamespace(),
+        session_id=sess.id,
+        message="three",
+        full_response="four",
+        last_metrics=None,
+        uprefs={"auto_memory": True, "auto_skills": True},
+        memory_manager=object(),
+        memory_vector=object(),
+        webhook_manager=None,
+        agent_rounds=2,
+        agent_tool_calls=2,
+        skills_manager=object(),
+    )
+
+    assert created == []
+
+
 def test_adapter_stream_falls_back_to_completed_stdout_when_no_deltas(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
     svc = _FakeService({
@@ -905,6 +1071,25 @@ def test_adapter_refuses_unsafe_cli_help(monkeypatch):
     assert out["ok"] is False
     assert out["status"] == "unsupported_unsafe_cli_mode"
     assert "--sandbox" in out["missing_flags"]
+
+
+def test_adapter_requires_long_sandbox_flag(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({"codex_cli_available": True, "authenticated": True})
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[1:] == ["exec", "--help"]:
+            return 0, "Usage: codex exec -s <MODE> --json", ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    out = run(adapter.available())
+
+    assert out["ok"] is False
+    assert out["status"] == "unsupported_unsafe_cli_mode"
+    assert out["cli_capabilities"]["sandbox_supported"] is False
 
 
 def test_adapter_never_uses_advertised_dangerous_flags(monkeypatch):

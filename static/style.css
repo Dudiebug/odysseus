@@ -8056,6 +8056,10 @@ body.hide-thinking .thinking-section { display: none !important; }
   opacity: 0.9;
   line-height: 1.5;
 }
+.thinking-content-inner.is-redacted {
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  opacity: 1;
+}
 .live-reply-content {
   animation: fadeSlideIn 0.3s ease-out;
 }
@@ -13279,6 +13283,37 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 .adm-quickstart-section.collapsed .adm-quickstart-body { display: none; }
 .adm-quickstart-section.collapsed .adm-section-caret { transform: rotate(-90deg); }
 
+.adm-codex-model-list {
+  gap: 4px;
+}
+.adm-codex-model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.adm-codex-model-empty {
+  padding: 7px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--fg) 68%, transparent);
+}
+.adm-model-row-disabled,
+.adm-model-row-hidden {
+  opacity: 0.62;
+}
+.adm-model-source-badge,
+.adm-model-hide-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fg) 58%, transparent);
+}
+.adm-model-source-note {
+  margin-left: 4px;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fg) 48%, transparent);
+  font-weight: 400;
+}
+
 /* Custom provider picker (logo + name) replacing the native <select> */
 .adm-provider-picker { position: relative; margin-bottom: 6px; }
 .adm-provider-combo {
@@ -13340,6 +13375,13 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 }
 .adm-provider-item:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
 .adm-provider-item.active { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+.adm-provider-codex-selected #adm-epUrl,
+.adm-provider-codex-selected #adm-epApiKey,
+.adm-provider-codex-selected #adm-epType,
+.adm-provider-codex-selected #adm-epApiTestBtn,
+.adm-provider-codex-selected #adm-epAddBtn {
+  opacity: 0.55;
+}
 
 /* When the Appearance tab is open, the #settings-modal-opacity slider (in
    the header) fades the modal so the user can see the rest of the UI react
@@ -13567,6 +13609,29 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   display: flex;
   gap: 4px;
   flex-shrink: 0;
+}
+.adm-model-source-note {
+  font-size: 10px;
+  font-weight: 400;
+  opacity: 0.45;
+  margin-left: 4px;
+}
+.adm-model-row {
+  gap: 6px;
+}
+.adm-model-row-hidden {
+  opacity: 0.58;
+}
+.adm-model-source-badge,
+.adm-model-hide-label {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.45;
+  white-space: nowrap;
+}
+.adm-model-hide-label {
+  margin-left: 6px;
+  color: color-mix(in srgb, var(--fg) 56%, transparent);
 }
 
 /* Status messages */

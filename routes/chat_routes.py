@@ -254,6 +254,7 @@ def setup_chat_routes(
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        codex_reasoning_effort = str(form_data.get("codex_reasoning_effort") or "").strip().lower() or None
         # Did the USER explicitly pick agent mode? (vs. us auto-escalating
         # below). Skill extraction should only learn from real agent sessions,
         # not chats we quietly promoted for a notes/calendar intent.
@@ -714,6 +715,7 @@ def setup_chat_routes(
                 async for event in CodexModelProvider().stream_chat(
                     messages,
                     model=sess.model or CODEX_EXPERIMENTAL_MODEL_ID,
+                    reasoning_effort=codex_reasoning_effort,
                     timeout_seconds=120,
                     odysseus_session_id=session,
                     allow_one_shot_fallback=True,
