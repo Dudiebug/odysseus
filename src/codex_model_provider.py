@@ -1,8 +1,8 @@
-"""Experimental Codex CLI model-provider capability boundary.
+"""Codex CLI model-provider capability boundary.
 
-This module implements the experimental Codex CLI provider boundary without
-reading Codex credential files or treating completed CLI output as token
-streaming. Normal API-provider behavior remains deliberately out of scope.
+This module implements the Codex CLI provider boundary without reading Codex
+credential files or treating completed CLI output as token streaming. Normal
+API-provider behavior remains deliberately out of scope.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from src.settings import load_settings, save_settings
 
 CODEX_MODEL_PROVIDER_FLAG = "ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED"
 CODEX_EXPERIMENTAL_MODEL_ID = "codex-cli/chatgpt-experimental"
-CODEX_EXPERIMENTAL_MODEL_DISPLAY = "Codex CLI / ChatGPT (experimental)"
 CODEX_EXPERIMENTAL_ENDPOINT_URL = "odysseus://codex-cli"
 CODEX_CHAT_TIMEOUT_SECONDS = 120
 CODEX_SETTINGS_KEY = "codex_model_provider"
@@ -67,7 +66,7 @@ _TOKEN_PATTERNS = (
 )
 
 _BASE_LIMITATIONS = [
-    "Experimental chat picker integration only; not a normal API endpoint.",
+    "Chat picker integration only; not a normal API endpoint.",
     "Stateless: session/resume is not implemented.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
     "The adapter requires Codex CLI sandbox support and runs with read-only sandbox mode.",
@@ -483,7 +482,7 @@ class CodexCliCapabilities:
     def limitations(self) -> list[str]:
         out = list(_BASE_LIMITATIONS)
         if self.streaming_supported:
-            out.append("Experimental SSE test route can stream real Codex CLI JSON events.")
+            out.append("Codex CLI JSON event streaming is available for chat streaming.")
         else:
             out.append("Streaming is not available because Codex CLI JSON event output is not advertised.")
         if self.approval_flag:
@@ -1307,10 +1306,10 @@ class CodexCliChatAdapter:
     @staticmethod
     def _build_prompt(messages: list[dict[str, Any]]) -> str:
         parts = [
-            "You are replying through Odysseus' experimental Codex CLI provider.",
+            "You are replying through Odysseus' Codex CLI provider.",
             "Return only the final assistant response.",
             "Do not run tools, shell commands, file edits, or web requests.",
-            "If a request requires tools, say that this experimental provider does not support tools yet.",
+            "If a request requires tools, say that this provider does not support tools yet.",
             "",
             "Conversation:",
         ]

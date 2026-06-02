@@ -744,7 +744,7 @@ def setup_chat_routes(
                 return
             elif is_codex_model_selection(sess.endpoint_url, sess.model):
                 if chat_mode != "chat":
-                    msg = "Codex / ChatGPT experimental provider is chat-only; Agent tools are not available for this model."
+                    msg = "Codex / ChatGPT provider is chat-only; Agent tools are not available for this model."
                     yield f'event: error\ndata: {json.dumps({"error": msg, "status": 400})}\n\n'
                     yield "data: [DONE]\n\n"
                     _active_streams.pop(session, None)

@@ -974,8 +974,8 @@ function initEndpointForm() {
     const streaming = data?.streaming_supported === true;
     const enabledCount = enabledModels.length;
     let details = streaming
-      ? 'Experimental. Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
-      : 'Experimental, one-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
+      ? 'Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
+      : 'One-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Signed out. Sign in with Codex / ChatGPT before running provider tests or showing it in the chat picker.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
@@ -999,7 +999,7 @@ function initEndpointForm() {
       ].join(' &middot; ');
     }
     if (codexSummaryEl) {
-      const pickerState = available ? 'Visible in the chat model picker as an experimental model.' : 'Hidden from the chat model picker until at least one enabled model is available.';
+      const pickerState = available ? 'Visible in the chat model picker once at least one enabled model is available.' : 'Hidden from the chat model picker until at least one enabled model is available.';
       codexSummaryEl.textContent = `${pickerState} Uses Codex CLI auth; no API key is stored.`;
     }
 
@@ -1366,7 +1366,7 @@ function initEndpointForm() {
       msg.textContent = ''; msg.className = '';
       if (_isCodexProviderSelected()) {
         _focusCodexProviderCard();
-        _setCodexMsg('Codex test chat runs from this experimental card, not the generic endpoint tester.', '');
+        _setCodexMsg('Codex test chat runs from this Codex card, not the generic endpoint tester.', '');
         return;
       }
       const rawUrl = (urlInput.value || provider.value).trim();

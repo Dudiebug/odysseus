@@ -14,7 +14,6 @@ from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_ENDPOINT_URL,
     CODEX_EXPERIMENTAL_MODEL_ID,
     CODEX_MODEL_PROVIDER_FLAG,
-    CODEX_EXPERIMENTAL_MODEL_DISPLAY,
     CodexCliChatAdapter,
     CodexModelProvider,
     codex_recommended_models,

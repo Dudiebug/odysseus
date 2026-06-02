@@ -1,4 +1,4 @@
-"""Admin-gated experimental Codex model-provider routes."""
+"""Admin-gated Codex model-provider routes."""
 
 import json
 
