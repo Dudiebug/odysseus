@@ -913,7 +913,7 @@ function initEndpointForm() {
     if (!models.length) {
       const reason = data?.connector_enabled
         ? 'No selected models yet. Start with GPT-5.5 or add a custom model ID.'
-        : 'Codex connector removed. Pick Codex / ChatGPT in the provider dropdown to set it up again.';
+        : 'Codex connector removed. Pick the Codex connector in the provider dropdown to set it up again.';
       codexModelsEl.innerHTML = `<div class="adm-codex-model-empty">${esc(reason)}</div>`;
       return;
     }
@@ -979,7 +979,7 @@ function initEndpointForm() {
       ? 'Chat picker uses the Codex CLI JSON event stream when available. Stateless. Codex connector uses Codex CLI auth. Not added as a normal API endpoint.'
       : 'One-shot fallback only, stateless. Codex connector uses Codex CLI auth. Not added as a normal API endpoint.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
-    else if (signInRequired) details += ' Signed out. Sign in with Codex / ChatGPT before running provider tests or showing it in the chat picker.';
+    else if (signInRequired) details += ' Signed out. Sign in with the Codex connector before running provider tests or showing it in the chat picker.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
     else if (status === 'cli_unavailable') details += ' Install or expose the Codex CLI in this runtime before testing.';
     codexDetailsEl.textContent = details;
@@ -1316,7 +1316,7 @@ function initEndpointForm() {
       setTimeout(() => {
         document.dispatchEvent(new CustomEvent('odysseus:open-codex-auth'));
       }, 50);
-      _setCodexMsg('Opened Settings -> Integrations -> Codex / ChatGPT. Refresh this card after sign-in completes.', '');
+      _setCodexMsg('Opened Settings -> Integrations -> Codex connector. Refresh this card after sign-in completes.', '');
     });
   }
   try { codexOpen = localStorage.getItem('odysseus.addModels.codex.open') === '1'; } catch { codexOpen = false; }

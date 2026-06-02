@@ -1408,7 +1408,7 @@ class CodexCliChatAdapter:
 
 
 class CodexModelProvider:
-    """Status/capability adapter for a future Codex CLI provider."""
+    """Status/capability adapter for the Codex CLI provider."""
 
     def __init__(
         self,

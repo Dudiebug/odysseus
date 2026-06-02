@@ -236,7 +236,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         archived: bool = Query(False),
     ):
         user = _require_user(request)
-        """List all completed research for the Library panel."""
         data_dir = Path("data/deep_research")
         items = []
         for p in data_dir.glob("*.json"):
