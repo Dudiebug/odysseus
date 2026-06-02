@@ -370,6 +370,8 @@ def test_api_models_includes_codex_when_feature_enabled_and_available(monkeypatc
     ]
     assert len(codex_items) == 1
     assert codex_items[0]["models"] == ["gpt-5.2-codex"]
+    assert codex_items[0]["capabilities"]["chat_supported"] is True
+    assert codex_items[0]["capabilities"]["agent_tools_supported"] is False
 
 
 def test_api_models_excludes_codex_when_feature_enabled_but_signed_out(monkeypatch):

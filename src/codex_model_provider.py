@@ -26,6 +26,40 @@ CODEX_EXPERIMENTAL_MODEL_DISPLAY = "Codex CLI / ChatGPT (experimental)"
 CODEX_EXPERIMENTAL_ENDPOINT_URL = "odysseus://codex-cli"
 CODEX_CHAT_TIMEOUT_SECONDS = 120
 CODEX_SETTINGS_KEY = "codex_model_provider"
+CODEX_RECOMMENDED_MODELS = (
+    {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5",
+        "description": "newest frontier model for complex coding, computer use, knowledge work, and research workflows",
+        "default": True,
+    },
+    {
+        "id": "gpt-5.4",
+        "label": "GPT-5.4",
+        "description": "flagship frontier model for professional work, stronger reasoning, tool use, and agentic workflows",
+    },
+    {
+        "id": "gpt-5.4-mini",
+        "label": "GPT-5.4 Mini",
+        "description": "fast and efficient model for responsive coding tasks and subagents",
+    },
+    {
+        "id": "gpt-5.3-codex",
+        "label": "GPT-5.3 Codex",
+        "description": "coding model for complex software engineering",
+    },
+    {
+        "id": "gpt-5.3-codex-spark",
+        "label": "GPT-5.3 Codex Spark",
+        "description": "research preview for near-instant real-time coding iteration; availability may depend on plan",
+    },
+    {
+        "id": "gpt-5.2",
+        "label": "GPT-5.2",
+        "description": "previous general-purpose coding and agentic model",
+    },
+)
+_CODEX_RECOMMENDED_BY_ID = {item["id"]: item for item in CODEX_RECOMMENDED_MODELS}
 
 _TOKEN_PATTERNS = (
     re.compile(r"(?i)(access_token|refresh_token|id_token)\s*[:=]\s*['\"]?[^'\"\s,}]+"),
@@ -103,32 +137,145 @@ def _unique_model_ids(values: Any) -> list[str]:
     return out
 
 
+def _sanitize_optional_text(value: Any, *, limit: int = 300) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if any(ord(ch) < 32 for ch in text):
+        return ""
+    return text[:limit]
+
+
+def _sanitize_thinking_effort(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if text in _REASONING_LEVELS else None
+
+
+def codex_recommended_models() -> list[dict[str, Any]]:
+    return [dict(item) for item in CODEX_RECOMMENDED_MODELS]
+
+
+def _recommended_model_meta(model_id: str) -> dict[str, Any]:
+    item = _CODEX_RECOMMENDED_BY_ID.get(model_id) or {}
+    return {
+        "id": model_id,
+        "label": item.get("label") or _model_display(model_id),
+        "description": item.get("description") or "",
+        "source": "recommended" if item else "custom",
+        "default": bool(item.get("default")),
+    }
+
+
+def _sanitize_selected_model_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        value = {"id": value}
+    model_id = _sanitize_model_id(value.get("id") or value.get("model_id"))
+    if not model_id:
+        return None
+    recommended = _recommended_model_meta(model_id)
+    source = str(value.get("source") or recommended["source"]).strip().lower()
+    if source not in {"recommended", "custom", "manual", "codex_cli"}:
+        source = recommended["source"]
+    source = "recommended" if source in {"recommended", "codex_cli"} and model_id in _CODEX_RECOMMENDED_BY_ID else "custom"
+    label = _sanitize_optional_text(value.get("label")) or recommended["label"]
+    description = _sanitize_optional_text(value.get("description")) or recommended["description"]
+    return {
+        "id": model_id,
+        "label": label,
+        "description": description,
+        "source": source,
+        "enabled": bool(value.get("enabled", True)),
+        "hidden": bool(value.get("hidden", False)),
+        "thinking_effort": _sanitize_thinking_effort(value.get("thinking_effort")),
+    }
+
+
+def _normalize_selected_models(values: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return out
+    for value in values:
+        item = _sanitize_selected_model_entry(value)
+        if not item:
+            continue
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        out.append(item)
+    return out
+
+
+def _legacy_selected_models(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    manual = _unique_model_ids(cfg.get("manual_models"))
+    hidden = set(_unique_model_ids(cfg.get("hidden_models")))
+    disabled = set(_unique_model_ids(cfg.get("disabled_models")))
+    out: list[dict[str, Any]] = []
+    for model_id in manual:
+        meta = _recommended_model_meta(model_id)
+        out.append({
+            "id": model_id,
+            "label": meta["label"],
+            "description": meta["description"],
+            "source": meta["source"],
+            "enabled": model_id not in disabled,
+            "hidden": model_id in hidden,
+            "thinking_effort": None,
+        })
+    return out
+
+
+def _config_projections(selected_models: list[dict[str, Any]]) -> dict[str, Any]:
+    selected_ids = [item["id"] for item in selected_models]
+    hidden_ids = [item["id"] for item in selected_models if item.get("hidden")]
+    disabled_ids = [item["id"] for item in selected_models if not item.get("enabled", True)]
+    custom_models = [item["id"] for item in selected_models if item.get("source") == "custom"]
+    return {
+        "manual_models": selected_ids,
+        "hidden_models": hidden_ids,
+        "disabled_models": disabled_ids,
+        "custom_models": custom_models,
+        "hidden_model_ids": hidden_ids,
+    }
+
+
 def load_codex_model_config() -> dict[str, Any]:
     cfg = load_settings().get(CODEX_SETTINGS_KEY) or {}
     if not isinstance(cfg, dict):
         cfg = {}
+    selected_models = _normalize_selected_models(cfg.get("selected_models"))
+    if not selected_models:
+        selected_models = _legacy_selected_models(cfg)
+    connector_enabled = cfg.get("connector_enabled")
+    if connector_enabled is None:
+        connector_enabled = bool(selected_models)
+    else:
+        connector_enabled = bool(connector_enabled)
     task_defaults = cfg.get("task_defaults") or {}
     if not isinstance(task_defaults, dict):
         task_defaults = {}
+    projections = _config_projections(selected_models)
     return {
-        "manual_models": _unique_model_ids(cfg.get("manual_models")),
-        "hidden_models": _unique_model_ids(cfg.get("hidden_models")),
-        "disabled_models": _unique_model_ids(cfg.get("disabled_models")),
+        "connector_enabled": connector_enabled,
+        "selected_models": selected_models,
+        **projections,
         "task_defaults": task_defaults,
     }
 
 
 def save_codex_model_config(config: dict[str, Any]) -> dict[str, Any]:
+    selected_models = _normalize_selected_models(config.get("selected_models"))
+    projections = _config_projections(selected_models)
     clean = {
-        "manual_models": _unique_model_ids(config.get("manual_models")),
-        "hidden_models": _unique_model_ids(config.get("hidden_models")),
-        "disabled_models": _unique_model_ids(config.get("disabled_models")),
+        "connector_enabled": bool(config.get("connector_enabled")) or bool(selected_models),
+        "selected_models": selected_models,
+        **projections,
         "task_defaults": config.get("task_defaults") if isinstance(config.get("task_defaults"), dict) else {},
     }
     settings = load_settings()
     settings[CODEX_SETTINGS_KEY] = clean
     save_settings(settings)
-    return clean
+    return load_codex_model_config()
 
 
 def update_codex_model_config(
@@ -138,44 +285,129 @@ def update_codex_model_config(
     restore_model: str | None = None,
     enable_model: str | None = None,
     disable_model: str | None = None,
+    remove_model: str | None = None,
+    thinking_model: str | None = None,
+    thinking_effort: str | None = None,
+    clear_all_models: bool = False,
+    connector_enabled: bool | None = None,
 ) -> dict[str, Any]:
     cfg = load_codex_model_config()
-    manual = set(cfg["manual_models"])
-    hidden = set(cfg["hidden_models"])
-    disabled = set(cfg["disabled_models"])
+    selected = [dict(item) for item in cfg["selected_models"]]
+
+    def _find(model_id: str) -> dict[str, Any] | None:
+        for item in selected:
+            if item["id"] == model_id:
+                return item
+        return None
+
+    if clear_all_models:
+        selected = []
+        cfg["connector_enabled"] = False
+
+    if connector_enabled is not None:
+        cfg["connector_enabled"] = bool(connector_enabled)
 
     model_id = _sanitize_model_id(add_model)
     if model_id:
-        manual.add(model_id)
-        hidden.discard(model_id)
-        disabled.discard(model_id)
+        item = _find(model_id)
+        if item:
+            item["hidden"] = False
+            item["enabled"] = True
+        else:
+            meta = _recommended_model_meta(model_id)
+            selected.append({
+                "id": model_id,
+                "label": meta["label"],
+                "description": meta["description"],
+                "source": meta["source"],
+                "enabled": True,
+                "hidden": False,
+                "thinking_effort": None,
+            })
+        cfg["connector_enabled"] = True
+
+    model_id = _sanitize_model_id(remove_model)
+    if model_id:
+        selected = [item for item in selected if item["id"] != model_id]
 
     model_id = _sanitize_model_id(hide_model)
     if model_id:
-        hidden.add(model_id)
-        disabled.discard(model_id)
+        item = _find(model_id)
+        if item:
+            item["hidden"] = True
+            item["enabled"] = True
 
     model_id = _sanitize_model_id(restore_model)
     if model_id:
-        hidden.discard(model_id)
+        item = _find(model_id)
+        if item:
+            item["hidden"] = False
 
     model_id = _sanitize_model_id(enable_model)
     if model_id:
-        disabled.discard(model_id)
-        hidden.discard(model_id)
+        item = _find(model_id)
+        if item:
+            item["enabled"] = True
+            item["hidden"] = False
 
     model_id = _sanitize_model_id(disable_model)
     if model_id:
-        disabled.add(model_id)
+        item = _find(model_id)
+        if item:
+            item["enabled"] = False
 
-    cfg["manual_models"] = sorted(manual)
-    cfg["hidden_models"] = sorted(hidden)
-    cfg["disabled_models"] = sorted(disabled)
+    model_id = _sanitize_model_id(thinking_model)
+    if model_id:
+        item = _find(model_id)
+        if item:
+            item["thinking_effort"] = _sanitize_thinking_effort(thinking_effort)
+
+    if not selected and connector_enabled is None and not clear_all_models:
+        cfg["connector_enabled"] = False
+
+    cfg["selected_models"] = selected
     return save_codex_model_config(cfg)
 
 
 def _model_display(model_id: str) -> str:
     return model_id.rsplit("/", 1)[-1] or model_id
+
+
+def first_enabled_codex_model(config: dict[str, Any] | None = None) -> str:
+    cfg = config or load_codex_model_config()
+    if not cfg.get("connector_enabled"):
+        return ""
+    for item in cfg.get("selected_models") or []:
+        if item.get("enabled", True) and not item.get("hidden"):
+            return item.get("id") or ""
+    return ""
+
+
+def codex_model_default_reasoning_effort(model_id: str, config: dict[str, Any] | None = None) -> str | None:
+    target = _sanitize_model_id(model_id)
+    if not target:
+        return None
+    cfg = config or load_codex_model_config()
+    for item in cfg.get("selected_models") or []:
+        if item.get("id") == target:
+            return _sanitize_thinking_effort(item.get("thinking_effort"))
+    return None
+
+
+def is_codex_model_available(model_id: str | None, *, public_only: bool = True, config: dict[str, Any] | None = None) -> bool:
+    target = _sanitize_model_id(model_id)
+    if not target:
+        return False
+    cfg = config or load_codex_model_config()
+    if not cfg.get("connector_enabled"):
+        return False
+    for item in cfg.get("selected_models") or []:
+        if item.get("id") != target:
+            continue
+        if not public_only:
+            return True
+        return bool(item.get("enabled", True)) and not bool(item.get("hidden"))
+    return False
 
 
 def codex_model_list_item(models: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -922,6 +1154,18 @@ class CodexCliChatAdapter:
         return False
 
     @classmethod
+    def _is_reasoning_event(cls, value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("thinking") is True:
+            return True
+        for key in ("type", "event", "kind", "channel", "name"):
+            text = str(value.get(key) or "").strip().lower()
+            if "reasoning" in text or "thinking" in text:
+                return True
+        return False
+
+    @classmethod
     def _extract_delta(cls, value: Any, depth: int = 0, *, in_content: bool = False) -> str:
         if depth > 6:
             return ""
@@ -937,6 +1181,8 @@ class CodexCliChatAdapter:
                     parts.append(found)
             return "".join(parts)
         if not isinstance(value, dict):
+            return ""
+        if cls._is_reasoning_event(value):
             return ""
 
         event_type = str(value.get("type") or "").strip().lower()
@@ -1164,11 +1410,15 @@ class CodexModelProvider:
             "tool_execution_allowed": False,
             "limitations": list(_BASE_LIMITATIONS),
             "model_discovery": {"source": "disabled"},
+            "recommended_models": codex_recommended_models(),
+            "connector_enabled": False,
+            "selected_models": [],
             "manual_models": [],
             "hidden_models": [],
             "disabled_models": [],
             "thinking_supported": False,
             "thinking_effort_levels": [],
+            "thinking_activity_supported": False,
         }
         if not enabled:
             return {
@@ -1210,6 +1460,11 @@ class CodexModelProvider:
             requires_sign_in = False
 
         cfg = load_codex_model_config()
+        base["connector_enabled"] = cfg["connector_enabled"]
+        base["selected_models"] = [dict(item) for item in cfg["selected_models"]]
+        base["manual_models"] = cfg["manual_models"]
+        base["hidden_models"] = cfg["hidden_models"]
+        base["disabled_models"] = cfg["disabled_models"]
         models: list[dict[str, Any]] = []
         chat_available = {"ok": False}
         if status == "available":
@@ -1225,30 +1480,27 @@ class CodexModelProvider:
                 cap = base["cli_capabilities"]
                 base["thinking_supported"] = bool(cap.get("reasoning_effort_supported"))
                 base["thinking_effort_levels"] = cap.get("reasoning_effort_levels") or []
-                source_ids = _unique_model_ids(
-                    list(chat_available.get("discovered_models") or [])
-                    + cfg["manual_models"]
-                    + cfg["hidden_models"]
-                    + cfg["disabled_models"]
-                )
-                hidden = set(cfg["hidden_models"])
-                disabled = set(cfg["disabled_models"])
-                for model_id in source_ids:
-                    is_hidden = model_id in hidden
-                    models.append({
-                        "id": model_id,
-                        "display": _model_display(model_id),
-                        "source": "manual" if model_id in cfg["manual_models"] else "codex_cli",
-                        "experimental": True,
-                        "hidden": is_hidden,
-                        "enabled": (not is_hidden) and model_id not in disabled,
-                        "streaming_supported": bool(chat_available.get("streaming_supported")),
-                        "thinking_supported": bool(base["thinking_supported"]),
-                        "thinking_effort_levels": list(base["thinking_effort_levels"]),
-                        "session_resume_supported": False,
-                        "tool_calling_supported": False,
-                        "agent_tools_supported": False,
-                    })
+                base["thinking_activity_supported"] = bool(chat_available.get("streaming_supported"))
+
+        for item in cfg["selected_models"]:
+            models.append({
+                "id": item["id"],
+                "display": item.get("label") or _model_display(item["id"]),
+                "label": item.get("label") or _model_display(item["id"]),
+                "description": item.get("description") or "",
+                "source": item.get("source") or "custom",
+                "experimental": True,
+                "hidden": bool(item.get("hidden")),
+                "enabled": bool(item.get("enabled", True)) and not bool(item.get("hidden")),
+                "thinking_effort": item.get("thinking_effort"),
+                "streaming_supported": bool(base["streaming_supported"]),
+                "thinking_supported": bool(base["thinking_supported"]),
+                "thinking_effort_levels": list(base["thinking_effort_levels"]),
+                "thinking_activity_supported": bool(base["thinking_activity_supported"]),
+                "session_resume_supported": False,
+                "tool_calling_supported": False,
+                "agent_tools_supported": False,
+            })
 
         return {
             **base,
@@ -1262,9 +1514,6 @@ class CodexModelProvider:
                 "auth_mode": auth_mode,
                 "codex_home": auth.get("codex_home", ""),
             },
-            "manual_models": cfg["manual_models"],
-            "hidden_models": cfg["hidden_models"],
-            "disabled_models": cfg["disabled_models"],
             "models": models,
         }
 

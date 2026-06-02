@@ -522,6 +522,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
+    from src.codex_model_provider import CodexModelProvider, is_codex_model_selection
+
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -555,6 +557,20 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
+
+    if is_codex_model_selection(url, model):
+        result = asyncio.run(
+            CodexModelProvider().test_chat(
+                messages_copy,
+                model=model,
+                timeout_seconds=timeout,
+            )
+        )
+        if not result.get("ok"):
+            raise HTTPException(502, result.get("error") or "Codex provider failed")
+        response = result.get("message") or ""
+        _set_cached_response(cache_key, response)
+        return response
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
@@ -646,6 +662,8 @@ async def llm_call_async(
     prompt_type: Optional[str] = None
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    from src.codex_model_provider import CodexModelProvider, is_codex_model_selection
+
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -667,6 +685,18 @@ async def llm_call_async(
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
+
+    if is_codex_model_selection(url, model):
+        result = await CodexModelProvider().test_chat(
+            messages_copy,
+            model=model,
+            timeout_seconds=timeout,
+        )
+        if not result.get("ok"):
+            raise HTTPException(502, result.get("error") or "Codex provider failed")
+        response = result.get("message") or ""
+        _set_cached_response(cache_key, response)
+        return response
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)

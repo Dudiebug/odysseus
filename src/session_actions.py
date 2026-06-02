@@ -8,7 +8,7 @@ and the task scheduler / builtin actions system.
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,23 @@ _THROWAWAY_NAMES = {
     "ok", "lol", "bruh", "hmm", "hm", "meh",
 }
 _THROWAWAY_MAX_MESSAGES = 4
+_AUTO_SORT_GRACE_PERIOD = timedelta(minutes=2)
+
+
+def session_protected_from_auto_sort(row, *, now: datetime | None = None) -> bool:
+    name = (getattr(row, "name", "") or "").strip()
+    if name.startswith("[GRP]"):
+        return True
+    created_at = getattr(row, "created_at", None) or getattr(row, "updated_at", None)
+    if not created_at:
+        return False
+    now = now or datetime.utcnow()
+    try:
+        created_cmp = created_at.replace(tzinfo=None) if getattr(created_at, "tzinfo", None) else created_at
+        now_cmp = now.replace(tzinfo=None) if getattr(now, "tzinfo", None) else now
+    except Exception:
+        return False
+    return (now_cmp - created_cmp) < _AUTO_SORT_GRACE_PERIOD
 
 
 async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
@@ -49,9 +66,12 @@ async def run_auto_sort(owner: str, skip_llm: bool = False) -> str:
             DbSession.archived == False,
             *([DbSession.owner == owner] if owner else []),
         ).all()
+        now = datetime.utcnow()
 
         for row in rows:
             if getattr(row, 'is_important', False):
+                continue
+            if session_protected_from_auto_sort(row, now=now):
                 continue
             if (row.name or "").strip() == "Incognito":
                 deleted_throwaway += 1

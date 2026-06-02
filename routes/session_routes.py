@@ -789,6 +789,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         users can clean junk without spending tokens.
         """
         from src.llm_core import llm_call
+        from src.session_actions import session_protected_from_auto_sort
         user = get_current_user(request)
         user_sessions = session_manager.get_sessions_for_user(user)
 
@@ -809,6 +810,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         _THROWAWAY_MAX_MESSAGES = 4  # only delete if <= this many messages
         try:
             rows = db.query(DbSession).filter(DbSession.archived == False, DbSession.owner == user).all()
+            now = datetime.utcnow()
             folder_map = {r.id: r.folder for r in rows}
             # Precompute per-session message counts in TWO aggregate queries
             # instead of 1–3 queries PER session — with many chats the per-row
@@ -822,6 +824,8 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             for row in rows:
                 # Never delete important sessions
                 if getattr(row, 'is_important', False):
+                    continue
+                if session_protected_from_auto_sort(row, now=now):
                     continue
                 # Always delete incognito sessions during cleanup
                 if (row.name or "").strip() == "Incognito":

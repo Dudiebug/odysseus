@@ -11,6 +11,13 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from src.codex_model_provider import (
+    CODEX_EXPERIMENTAL_ENDPOINT_URL,
+    codex_model_provider_enabled,
+    first_enabled_codex_model,
+    is_codex_model_available,
+    is_codex_model_selection,
+)
 from src.endpoint_resolver import resolve_endpoint
 from src.auth_helpers import get_current_user
 
@@ -36,13 +43,57 @@ def _first_chat_model(models) -> str:
 
 def _resolve_research_endpoint(sess) -> tuple:
     """Return (endpoint_url, model, headers) for Deep Research, checking admin overrides."""
+    fallback_url = sess.endpoint_url
+    fallback_model = sess.model
+    fallback_headers = sess.headers
+    if is_codex_model_selection(fallback_url, fallback_model) and not is_codex_model_available(fallback_model):
+        fallback_url, fallback_model, fallback_headers = "", "", {}
     url, model, headers = resolve_endpoint(
         "research",
-        fallback_url=sess.endpoint_url,
-        fallback_model=sess.model,
-        fallback_headers=sess.headers,
+        fallback_url=fallback_url,
+        fallback_model=fallback_model,
+        fallback_headers=fallback_headers,
     )
     return url, model, headers
+
+
+def _resolve_global_research_endpoint() -> tuple[str, str, dict]:
+    ep_url, ep_model, ep_headers = resolve_endpoint("research")
+    if not ep_url:
+        ep_url, ep_model, ep_headers = resolve_endpoint("utility")
+    if not ep_url:
+        ep_url, ep_model, ep_headers = resolve_endpoint("default")
+    if not ep_url:
+        ep_url, ep_model, ep_headers = resolve_endpoint("chat")
+    if not ep_url:
+        from src.database import SessionLocal
+        from src.database import ModelEndpoint
+        from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
+
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,
+            ).first()
+            if ep:
+                base = normalize_base(ep.base_url)
+                ep_url = build_chat_url(base)
+                ep_headers = build_headers(ep.api_key, base)
+                ep_model = ""
+                if ep.cached_models:
+                    try:
+                        models = json.loads(ep.cached_models)
+                        if models:
+                            ep_model = _first_chat_model(models)
+                    except Exception:
+                        pass
+        finally:
+            db.close()
+    if not ep_url and codex_model_provider_enabled():
+        codex_model = first_enabled_codex_model()
+        if codex_model:
+            return CODEX_EXPERIMENTAL_ENDPOINT_URL, codex_model, {}
+    return ep_url or "", ep_model or "", ep_headers or {}
 
 
 def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
@@ -298,6 +349,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         search_provider: Optional[str] = None
         endpoint_id: Optional[str] = None
         model: Optional[str] = None
+        source_session_id: Optional[str] = None
         max_time: int = Field(default=300, ge=60, le=1800)
         extraction_timeout: Optional[int] = Field(default=None, ge=15, le=600)
         extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
@@ -351,41 +403,18 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             finally:
                 db.close()
         else:
-            ep_url, ep_model, ep_headers = resolve_endpoint("research")
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("utility")
-            # When neither research nor utility is configured, use the user's
-            # configured DEFAULT model (default_endpoint_id/default_model) rather
-            # than arbitrarily grabbing the first enabled endpoint's first model
-            # (which surfaced gpt-3.5). "Default" should mean the default model.
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("default")
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("chat")
-            if not ep_url:
-                from src.database import SessionLocal
-                from src.database import ModelEndpoint
-                from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
-                db = SessionLocal()
+            ep_url, ep_model, ep_headers = "", "", {}
+            if body.source_session_id and session_manager is not None:
                 try:
-                    ep = db.query(ModelEndpoint).filter(
-                        ModelEndpoint.is_enabled == True,
-                    ).first()
-                    if ep:
-                        base = normalize_base(ep.base_url)
-                        ep_url = build_chat_url(base)
-                        ep_headers = build_headers(ep.api_key, base)
-                        ep_model = ""
-                        if ep.cached_models:
-                            try:
-                                import json as _json
-                                models = _json.loads(ep.cached_models)
-                                if models:
-                                    ep_model = _first_chat_model(models)
-                            except Exception:
-                                pass
-                finally:
-                    db.close()
+                    src_sess = session_manager.get_session(body.source_session_id)
+                    src_owner = getattr(src_sess, "owner", None)
+                    if src_owner and src_owner != user:
+                        raise HTTPException(404, "Source session not found")
+                    ep_url, ep_model, ep_headers = _resolve_research_endpoint(src_sess)
+                except KeyError:
+                    pass
+            if not ep_url:
+                ep_url, ep_model, ep_headers = _resolve_global_research_endpoint()
             if not ep_url:
                 raise HTTPException(400, "No endpoints configured. Add one in Settings first.")
             if body.model:
@@ -482,6 +511,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         result = research_handler.get_result(session_id)
         sources = research_handler.get_sources(session_id) or []
         query = ""
+        saved_ep_url = ""
+        saved_ep_model = ""
 
         path = Path("data/deep_research") / f"{session_id}.json"
         if path.exists():
@@ -492,6 +523,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 if not sources:
                     sources = disk.get("sources", []) or []
                 query = disk.get("query", "") or ""
+                saved_ep_url = disk.get("llm_endpoint", "") or ""
+                saved_ep_model = disk.get("llm_model", "") or ""
             except Exception as e:
                 logger.warning(f"Could not read research JSON for spinoff: {e}")
 
@@ -520,6 +553,10 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             if not ep_headers and r_headers:
                 ep_headers = dict(r_headers)
 
+        if saved_ep_url and saved_ep_model:
+            if not is_codex_model_selection(saved_ep_url, saved_ep_model) or is_codex_model_available(saved_ep_model):
+                _merge(saved_ep_url, saved_ep_model, {})
+
         if not ep_url or not ep_model:
             _merge(*resolve_endpoint("chat"))
         if not ep_url or not ep_model:
@@ -527,28 +564,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if not ep_url or not ep_model:
             _merge(*resolve_endpoint("utility"))
         if not ep_url or not ep_model:
-            # Last resort: any enabled endpoint
-            from src.database import SessionLocal
-            from src.database import ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
-            db = SessionLocal()
-            try:
-                ep = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).first()
-                if ep:
-                    base = normalize_base(ep.base_url)
-                    fallback_url = build_chat_url(base)
-                    fallback_headers = build_headers(ep.api_key, base)
-                    fallback_model = ""
-                    if ep.cached_models:
-                        try:
-                            models = json.loads(ep.cached_models)
-                            if models:
-                                fallback_model = models[0]
-                        except Exception:
-                            pass
-                    _merge(fallback_url, fallback_model, fallback_headers)
-            finally:
-                db.close()
+            _merge(*_resolve_global_research_endpoint())
 
         if not ep_url or not ep_model:
             raise HTTPException(400, "No endpoint configured — add one in Settings first")

@@ -726,12 +726,36 @@ import createResearchSynapse from './researchSynapse.js';
         try { await documentModule.saveDocument({ silent: true }); } catch (_e) { /* best-effort */ }
         fd.append('active_doc_id', documentModule.getCurrentDocId());
       }
+      function _setChatModeUi() {
+        const _ab = document.getElementById('mode-agent-btn');
+        const _cb = document.getElementById('mode-chat-btn');
+        if (_ab && _cb) {
+          _ab.classList.remove('active');
+          _cb.classList.add('active');
+          const _toggle = _ab.closest('.mode-toggle');
+          if (_toggle) _toggle.classList.add('mode-chat');
+        }
+        if (typeof Storage !== 'undefined' && Storage.KEYS) {
+          const _st = Storage.getJSON(Storage.KEYS.TOGGLES, {});
+          _st.mode = 'chat';
+          Storage.setJSON(Storage.KEYS.TOGGLES, _st);
+        }
+      }
       // Web toggle: pre-search in Chat mode, tool permission in Agent mode
       const toggleState = Storage.loadToggleState();
       let isAgentMode = (toggleState.mode || 'chat') === 'agent';
+      const _currentSessionMeta = sessionModule && sessionModule.getSessions
+        ? sessionModule.getSessions().find(s => s.id === streamSessionId)
+        : null;
+      const _pendingChatModel = sessionModule && sessionModule.getPendingChat
+        ? sessionModule.getPendingChat()
+        : null;
+      const _isCodexSelection =
+        ((_currentSessionMeta && _currentSessionMeta.endpoint_url === 'odysseus://codex-cli')
+          || (!_currentSessionMeta && _pendingChatModel && _pendingChatModel.url === 'odysseus://codex-cli'));
       // Auto-escalate to agent mode when a document is open — the user expects
       // the AI to see the document and have tools to edit it
-      if (!isAgentMode && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
+      if (!isAgentMode && !_isCodexSelection && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
         isAgentMode = true;
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
@@ -921,29 +945,27 @@ import createResearchSynapse from './researchSynapse.js';
           return;
         }
         let errText = `Error ${res.status}`;
+        let errJson = null;
         try {
           const errBody = await res.text();
+          try { errJson = JSON.parse(errBody); } catch {}
+          if (errJson && typeof errJson === 'object') {
+            const detail = errJson.detail && typeof errJson.detail === 'object' ? errJson.detail : {};
+            errText = detail.error || errJson.error || errJson.detail || errText;
+            if ((detail.code || errJson.code) === 'agent_mode_unsupported') {
+              errText = detail.error || errJson.error || 'This model supports chat streaming only — switched to Chat mode. Try again.';
+              _setChatModeUi();
+            }
+          }
           // Parse nested JSON error if present
           const m = errBody.match(/"message"\s*:\s*"([^"]+)"/);
-          if (m) errText = m[1].replace(/\\"/g, '"');
+          if (!errJson && m) errText = m[1].replace(/\\"/g, '"');
           else if (errBody.length < 200) errText = errBody;
         } catch {}
         // Auto-switch to chat mode for tool-related errors
         if (errText.includes('tool') || errText.includes('auto')) {
           errText = 'This model doesn\'t support agent tools — switched to Chat mode. Try again.';
-          const _ab = document.getElementById('mode-agent-btn');
-          const _cb = document.getElementById('mode-chat-btn');
-          if (_ab && _cb) {
-            _ab.classList.remove('active');
-            _cb.classList.add('active');
-            const _toggle = _ab.closest('.mode-toggle');
-            if (_toggle) _toggle.classList.add('mode-chat');
-          }
-          if (typeof Storage !== 'undefined' && Storage.KEYS) {
-            const _st = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-            _st.mode = 'chat';
-            Storage.setJSON(Storage.KEYS.TOGGLES, _st);
-          }
+          _setChatModeUi();
         }
         typewriterInto(holder.querySelector('.body'), errText);
         enableResearchBtn();
@@ -1328,7 +1350,11 @@ import createResearchSynapse from './researchSynapse.js';
               // Handle SSE error events (e.g. HTTP 404 from provider)
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
-                const errMsg = json.text || json.error?.message || `Error ${json.status || 'unknown'}`;
+                let errMsg = json.text || json.error?.message || json.error || `Error ${json.status || 'unknown'}`;
+                if ((json.code || '') === 'agent_mode_unsupported' || /chat-only|agent tools are not available/i.test(String(errMsg || ''))) {
+                  errMsg = 'This model supports chat streaming only — switched to Chat mode. Try again.';
+                  _setChatModeUi();
+                }
                 console.error('Stream error:', errMsg);
                 if (spinner && spinner.element) spinner.destroy();
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);

@@ -143,9 +143,9 @@ function _initModelPickerDropdown() {
       const probeResult = item.endpoint_id ? _localProbe[item.endpoint_id] : null;
       const isLocalDead = !!(probeResult && probeResult.alive === false);
       allModels.forEach((mid, i) => {
-        // Deduplicate by model ID — prefer DB endpoints over env-discovered
-        if (seen.has(mid)) return;
-        seen.add(mid);
+        const dedupeKey = `${item.url || ''}::${mid}`;
+        if (seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
         result.push({
           mid,
           display: (allDisplay[i] || mid).split('/').pop(),
@@ -154,6 +154,9 @@ function _initModelPickerDropdown() {
           epName: item.endpoint_name || '',
           stale: isLocalDead,
           staleReason: isLocalDead ? (probeResult.error || 'not responding') : '',
+          provider: item.provider || '',
+          experimental: !!item.experimental,
+          capabilities: item.capabilities || {},
         });
       });
     });
@@ -268,7 +271,13 @@ function _initModelPickerDropdown() {
     }
     if (!currentSessionId && _pendingChat) {
       // Already have a deferred session — just update the model
-      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId });
+      _deps.setPendingChat({
+        url: m.url,
+        modelId: m.mid,
+        endpointId: m.endpointId,
+        capabilities: m.capabilities || {},
+        provider: m.provider || '',
+      });
       // Header stays as session name — model switch only updates picker
       updateModelPicker();
       uiModule.showToast(`Using ${m.display}`);

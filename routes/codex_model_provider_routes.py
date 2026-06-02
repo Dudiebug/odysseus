@@ -23,6 +23,7 @@ class CodexTestChatRequest(BaseModel):
 class CodexModelUpdateRequest(BaseModel):
     model_id: str | None = None
     action: str | None = None
+    thinking_effort: str | None = None
 
 
 def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None) -> APIRouter:
@@ -88,7 +89,18 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
         require_admin(request)
         if not (body.model_id or "").strip():
             return {"ok": False, "status": "invalid_request", "error": "Model ID is required"}
-        cfg = update_codex_model_config(add_model=body.model_id)
+        cfg = update_codex_model_config(
+            add_model=body.model_id,
+            thinking_model=body.model_id,
+            thinking_effort=body.thinking_effort,
+            connector_enabled=True,
+        )
+        return {"ok": True, "config": cfg}
+
+    @router.delete("/connector")
+    async def remove_connector(request: Request):
+        require_admin(request)
+        cfg = update_codex_model_config(clear_all_models=True, connector_enabled=False)
         return {"ok": True, "config": cfg}
 
     @router.patch("/models")
@@ -96,14 +108,19 @@ def setup_codex_model_provider_routes(provider: CodexModelProvider | None = None
         require_admin(request)
         action = (body.action or "").strip().lower()
         kwargs = {}
-        if action in {"hide", "remove"}:
+        if action == "hide":
             kwargs["hide_model"] = body.model_id
+        elif action == "remove":
+            kwargs["remove_model"] = body.model_id
         elif action == "restore":
             kwargs["restore_model"] = body.model_id
         elif action == "disable":
             kwargs["disable_model"] = body.model_id
         elif action == "enable":
             kwargs["enable_model"] = body.model_id
+        elif action == "set_thinking_effort":
+            kwargs["thinking_model"] = body.model_id
+            kwargs["thinking_effort"] = body.thinking_effort
         else:
             return {"ok": False, "status": "invalid_request", "error": "Unsupported model action"}
         if not (body.model_id or "").strip():

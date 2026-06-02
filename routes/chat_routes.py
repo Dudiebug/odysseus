@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, List
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from core.models import ChatMessage
@@ -20,6 +20,8 @@ from src.model_context import estimate_tokens
 from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_ID,
     CodexModelProvider,
+    codex_model_default_reasoning_effort,
+    is_codex_model_available,
     is_codex_model_selection,
 )
 from src.chat_helpers import coerce_message_and_session
@@ -79,7 +81,25 @@ def _clear_orphaned_session_endpoint(sess) -> bool:
     if not getattr(sess, "endpoint_url", ""):
         return False
     if is_codex_model_selection(sess.endpoint_url, getattr(sess, "model", "")):
-        return False
+        if is_codex_model_available(getattr(sess, "model", "")):
+            return False
+        sess.endpoint_url = ""
+        sess.model = ""
+        sess.headers = {}
+        db = SessionLocal()
+        try:
+            db_session = db.query(DBSession).filter(DBSession.id == sess.id).first()
+            if db_session:
+                db_session.endpoint_url = ""
+                db_session.model = ""
+                db_session.updated_at = datetime.utcnow()
+                db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            return False
+        finally:
+            db.close()
     db = SessionLocal()
     try:
         endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
@@ -294,6 +314,25 @@ def setup_chat_routes(
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
             raise HTTPException(400, "Invalid request parameters")
+
+        codex_session = is_codex_model_selection(sess.endpoint_url, sess.model)
+        if codex_session and chat_mode != "chat":
+            if user_requested_agent:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "code": "agent_mode_unsupported",
+                        "error": "Codex currently supports chat streaming only. Agent tool mode is not enabled for this provider.",
+                        "requested_mode": "agent",
+                        "supported_mode": "chat",
+                        "agent_tools_supported": False,
+                        "tool_execution_allowed": False,
+                    },
+                )
+            chat_mode = "chat"
+            auto_escalated = False
+        if codex_session and not codex_reasoning_effort:
+            codex_reasoning_effort = codex_model_default_reasoning_effort(sess.model)
 
         # ------------------------------------------------------------------ #
         # Privilege gates that must fire BEFORE any LLM work / token spend.
@@ -729,6 +768,14 @@ def setup_chat_routes(
                     elif event_type == "metrics":
                         last_metrics = event.get("data") or {}
                         last_metrics["model"] = sess.model or CODEX_EXPERIMENTAL_MODEL_ID
+                        last_metrics.setdefault("provider", "codex_cli")
+                        last_metrics.setdefault("usage_source", "real")
+                        if ctx.context_length and "input_tokens" in last_metrics:
+                            last_metrics.setdefault(
+                                "context_percent",
+                                min(round((last_metrics["input_tokens"] / ctx.context_length) * 100, 1), 100.0),
+                            )
+                            last_metrics.setdefault("context_length", ctx.context_length)
                         yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                     elif event_type == "error":
                         yield f'event: error\ndata: {json.dumps({"error": event.get("error") or "Codex provider failed", "status": event.get("status") or "codex_failed"})}\n\n'

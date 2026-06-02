@@ -474,6 +474,9 @@ function _readSettings() {
     model: document.getElementById('research-model')?.value || undefined,
     category: category || undefined,
   };
+  if (!settings.endpoint_id && _sessionModule && typeof _sessionModule.getCurrentSessionId === 'function') {
+    settings.source_session_id = _sessionModule.getCurrentSessionId() || undefined;
+  }
   const epSel = document.getElementById('research-endpoint');
   if (epSel && epSel.value) {
     const opt = epSel.options[epSel.selectedIndex];

@@ -794,8 +794,15 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
       credentials: 'same-origin',
       signal: abortCtrl.signal,
     });
+    if (!res.ok || !res.body) {
+      let errText = `[HTTP ${res.status}]`;
+      try { errText = await res.text() || errText; } catch {}
+      bodyEl.innerHTML = `<i style="color:var(--color-error);">${uiModule.esc(errText)}</i>`;
+      return;
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+    let _nextIsError = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -807,11 +814,24 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
       _buffer = lines.pop(); // keep incomplete last line
 
       for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          if (line.slice(7).trim() === 'error') _nextIsError = true;
+          continue;
+        }
         if (!line.startsWith('data: ')) continue;
         if (line === 'data: [DONE]') continue;
 
         try {
           const json = JSON.parse(line.slice(6));
+          if (_nextIsError || json.status >= 400 || json.code === 'agent_mode_unsupported') {
+            _nextIsError = false;
+            const errMsg = json.error || json.text || `[Error ${json.status || 'unknown'}]`;
+            const errDiv = document.createElement('div');
+            errDiv.style.cssText = 'color:var(--color-error);font-style:italic;padding:4px 0;';
+            errDiv.textContent = `[Error: ${errMsg}]`;
+            bodyEl.appendChild(errDiv);
+            continue;
+          }
 
           // Text delta (OpenAI format)
           if (json.choices?.[0]?.delta?.content) {

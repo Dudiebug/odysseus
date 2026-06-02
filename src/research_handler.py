@@ -192,6 +192,8 @@ class ResearchHandler:
             "task": None,
             "researcher": None,
             "query": query,
+            "llm_endpoint": llm_endpoint,
+            "llm_model": llm_model,
             "status": "running",
             "progress": {},
             "result": None,
@@ -469,6 +471,8 @@ class ResearchHandler:
             path = RESEARCH_DATA_DIR / f"{session_id}.json"
             data = {
                 "query": entry["query"],
+                "llm_endpoint": entry.get("llm_endpoint", ""),
+                "llm_model": entry.get("llm_model", ""),
                 "status": entry["status"],
                 "result": entry["result"],
                 "raw_report": entry.get("raw_report", ""),

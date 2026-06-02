@@ -789,6 +789,7 @@ function initEndpointForm() {
   const codexCapabilitiesEl = el('adm-codexProviderCapabilities');
   const codexModelEl = el('adm-codexProviderModel');
   const codexModelsEl = el('adm-codexProviderModels');
+  const codexPresetSelect = el('adm-codexPresetSelect');
   const codexManualModelInput = el('adm-codexManualModelId');
   const codexAddModelBtn = el('adm-codexAddModelBtn');
   const codexMsgEl = el('adm-codexProviderMsg');
@@ -799,6 +800,7 @@ function initEndpointForm() {
   const codexTestBtn = el('adm-codexTestBtn');
   const codexStreamTestBtn = el('adm-codexStreamTestBtn');
   const codexRefreshBtn = el('adm-codexRefreshBtn');
+  const codexRemoveConnectorBtn = el('adm-codexRemoveConnectorBtn');
   const codexSignOutBtn = el('adm-codexSignOutBtn');
   const codexResetBtn = el('adm-codexResetBtn');
   let codexProviderStatus = null;
@@ -876,14 +878,42 @@ function initEndpointForm() {
     return (Array.isArray(data?.models) ? data.models : []).filter(m => m && m.id && m.enabled !== false && !m.hidden);
   }
 
+  function _selectedCodexModelIds(data) {
+    return (Array.isArray(data?.models) ? data.models : []).map(m => m && m.id).filter(Boolean);
+  }
+
+  function _toggleCodexCustomInput() {
+    if (!codexManualModelInput) return;
+    const isCustom = codexPresetSelect && codexPresetSelect.value === '__custom__';
+    codexManualModelInput.style.display = isCustom ? '' : 'none';
+    if (!isCustom) codexManualModelInput.value = '';
+  }
+
+  function _renderCodexPresetOptions(data) {
+    if (!codexPresetSelect) return;
+    const selected = new Set(_selectedCodexModelIds(data));
+    const recommended = Array.isArray(data?.recommended_models) ? data.recommended_models : [];
+    const current = codexPresetSelect.value;
+    const options = recommended.filter(m => !selected.has(m.id));
+    codexPresetSelect.innerHTML =
+      `<option value="">Recommended Codex model</option>` +
+      options.map(m => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`).join('') +
+      `<option value="__custom__">Custom model ID…</option>`;
+    if (current === '__custom__') codexPresetSelect.value = '__custom__';
+    else if (current && [...codexPresetSelect.options].some(o => o.value === current)) codexPresetSelect.value = current;
+    else if (options.length) codexPresetSelect.value = options[0].id;
+    _toggleCodexCustomInput();
+  }
+
   function _renderCodexModels(data) {
     if (!codexModelsEl) return;
     const models = Array.isArray(data?.models) ? data.models : [];
-    const discovery = data?.model_discovery?.source || 'none';
+    const discovery = data?.model_discovery?.source || 'manual';
+    _renderCodexPresetOptions(data);
     if (!models.length) {
-      const reason = discovery === 'manual'
-        ? 'This Codex CLI exposes a model flag but no model list. Add exact model IDs manually.'
-        : 'No Codex models are available yet. Add a manual model ID if this CLI cannot list models.';
+      const reason = (data?.connector_enabled || _isCodexProviderSelected())
+        ? 'No Codex models are selected yet. Start with GPT-5.5 or add a custom model ID.'
+        : 'Connector removed. Pick Codex / ChatGPT in the provider dropdown to set it up again.';
       codexModelsEl.innerHTML = `<div class="adm-codex-model-empty">${esc(reason)}</div>`;
       return;
     }
@@ -892,18 +922,32 @@ function initEndpointForm() {
       <span class="mcp-tools-count">${_codexEnabledModels(data).length}/${models.length} enabled</span>
     </div><div class="mcp-tools-list adm-codex-model-list">` + models.map(m => {
       const state = m.hidden ? 'hidden' : (m.enabled === false ? 'disabled' : 'enabled');
-      const source = m.source === 'manual' ? 'manual' : 'discovered';
+      const source = m.source === 'recommended' ? 'recommended' : 'custom';
+      const levels = Array.isArray(m?.thinking_effort_levels) ? m.thinking_effort_levels : [];
+      const canThink = !!m?.thinking_supported && levels.length > 0;
+      const thinkSelect = `<select data-codex-thinking-model="${esc(m.id)}" ${canThink ? '' : 'disabled'} style="min-width:136px;">
+        <option value="">${canThink ? 'Provider default' : 'Thinking unavailable'}</option>
+        ${levels.map(level => `<option value="${esc(level)}" ${m.thinking_effort === level ? 'selected' : ''}>${esc(level)}</option>`).join('')}
+      </select>`;
       const primaryAction = m.hidden
         ? `<button type="button" class="admin-btn-sm" data-codex-model-action="restore" data-model-id="${esc(m.id)}">Restore</button>`
         : `<button type="button" class="admin-btn-sm" data-codex-model-action="${m.enabled === false ? 'enable' : 'disable'}" data-model-id="${esc(m.id)}">${m.enabled === false ? 'Enable' : 'Disable'}</button>`;
       const hideAction = !m.hidden
         ? `<button type="button" class="admin-btn-sm" data-codex-model-action="hide" data-model-id="${esc(m.id)}" style="opacity:0.75;">Hide</button>`
         : '';
+      const removeAction = `<button type="button" class="admin-btn-sm" data-codex-model-action="remove" data-model-id="${esc(m.id)}" style="opacity:0.75;">Remove</button>`;
       return `<div class="adm-model-row adm-codex-model-row adm-model-row-${state}" title="${esc(m.id)}">
-        <span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;"><code>${esc(m.id)}</code></span>
-        <span class="adm-model-source-badge">${esc(source)}</span>
-        <span class="adm-model-hide-label">${esc(state)}</span>
-        ${primaryAction}${hideAction}
+        <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:2px;">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <strong>${esc(m.label || m.display || m.id)}</strong>
+            <code>${esc(m.id)}</code>
+            <span class="adm-model-source-badge">${esc(source)}</span>
+            <span class="adm-model-hide-label">${esc(state)}</span>
+          </div>
+          ${m.description ? `<div class="admin-ep-detail" style="white-space:normal;">${esc(m.description)}</div>` : ''}
+        </div>
+        ${thinkSelect}
+        ${primaryAction}${hideAction}${removeAction}
       </div>`;
     }).join('') + '</div>';
   }
@@ -919,6 +963,9 @@ function initEndpointForm() {
     const authenticated = !!data?.authenticated;
     const cliAvailable = !!data?.cli_available;
     codexProviderStatus = data || null;
+    const totalCount = Array.isArray(data?.models) ? data.models.length : 0;
+    const shouldShowCard = _isCodexProviderSelected() || !!data?.connector_enabled || totalCount > 0;
+    if (codexCard) codexCard.style.display = shouldShowCard ? 'flex' : 'none';
 
     codexStatusEl.textContent = _codexStatusLabel(status);
     codexStatusEl.className = available ? 'admin-badge' : 'admin-badge admin-badge-off';
@@ -926,7 +973,6 @@ function initEndpointForm() {
 
     const streaming = data?.streaming_supported === true;
     const enabledCount = enabledModels.length;
-    const totalCount = Array.isArray(data?.models) ? data.models.length : 0;
     let details = streaming
       ? 'Experimental. Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
       : 'Experimental, one-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
@@ -940,16 +986,20 @@ function initEndpointForm() {
       const streamText = streaming ? 'yes' : 'no';
       const levels = Array.isArray(data?.thinking_effort_levels) ? data.thinking_effort_levels : [];
       const thinkText = data?.thinking_supported ? `supported (${levels.join(', ') || 'provider default'})` : 'not advertised by CLI';
+      const activityText = data?.thinking_activity_supported ? 'safe metrics only' : 'not available';
       codexCapabilitiesEl.innerHTML = [
         `CLI: <strong>${cliAvailable ? 'available' : 'unavailable'}</strong>`,
         `Auth: <strong>${authText}</strong>`,
         `Models: <strong>${enabledCount}/${totalCount}</strong>`,
         `Streaming: <strong>${streamText}</strong>`,
         `Thinking control: <strong>${esc(thinkText)}</strong>`,
+        `Reasoning activity: <strong>${esc(activityText)}</strong>`,
+        `Tool calling: <strong>unsupported</strong>`,
+        `Agent mode: <strong>chat only</strong>`,
       ].join(' &middot; ');
     }
     if (codexSummaryEl) {
-      const pickerState = available ? 'Visible in the chat model picker as an experimental model.' : 'Hidden from the chat model picker until available.';
+      const pickerState = available ? 'Visible in the chat model picker as an experimental model.' : 'Hidden from the chat model picker until at least one enabled model is available.';
       codexSummaryEl.textContent = `${pickerState} Uses Codex CLI auth; no API key is stored.`;
     }
 
@@ -974,6 +1024,7 @@ function initEndpointForm() {
     }
     if (codexResetBtn) codexResetBtn.disabled = disabled;
     if (codexAddModelBtn) codexAddModelBtn.disabled = disabled;
+    if (codexRemoveConnectorBtn) codexRemoveConnectorBtn.disabled = disabled || totalCount === 0;
     _renderCodexModels(data || {});
   }
 
@@ -1146,7 +1197,7 @@ function initEndpointForm() {
     }
   }
 
-  async function _updateCodexModel(action, modelId) {
+  async function _updateCodexModel(action, modelId, extras = {}) {
     if (!modelId) return;
     _setCodexMsg('Updating Codex model list...', '');
     try {
@@ -1154,7 +1205,7 @@ function initEndpointForm() {
         method: 'PATCH',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, model_id: modelId }),
+        body: JSON.stringify({ action, model_id: modelId, ...extras }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
@@ -1169,10 +1220,37 @@ function initEndpointForm() {
     }
   }
 
+  async function _removeCodexConnector() {
+    const ok = window.styledConfirm
+      ? await window.styledConfirm('Remove Codex connector from Odysseus? This removes selected Codex models from the picker but does not sign out of Codex CLI.', { confirmText: 'Remove', danger: true })
+      : window.confirm('Remove Codex connector from Odysseus? This removes selected Codex models from the picker but does not sign out of Codex CLI.');
+    if (!ok) return;
+    _setCodexMsg('Removing Codex connector...', '');
+    try {
+      const res = await fetch('/api/codex-model-provider/connector', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        _setCodexMsg(data.error || 'Could not remove Codex connector.', 'admin-error');
+        return;
+      }
+      await _refreshCodexProviderStatus();
+      await _refreshAfterEndpointChange();
+      _setCodexMsg('Codex connector removed. CLI sign-in was left unchanged.', 'admin-success');
+    } catch (e) {
+      _setCodexMsg('Could not remove Codex connector: ' + (e?.message || 'request failed'), 'admin-error');
+    }
+  }
+
   async function _addCodexManualModel() {
-    const modelId = (codexManualModelInput?.value || '').trim();
+    const selectedPreset = (codexPresetSelect?.value || '').trim();
+    const modelId = selectedPreset === '__custom__'
+      ? (codexManualModelInput?.value || '').trim()
+      : selectedPreset;
     if (!modelId) {
-      _setCodexMsg('Enter an exact Codex model ID first.', 'admin-error');
+      _setCodexMsg('Choose a recommended Codex model or enter a custom model ID first.', 'admin-error');
       return;
     }
     if (/\s/.test(modelId)) {
@@ -1194,9 +1272,10 @@ function initEndpointForm() {
         return;
       }
       if (codexManualModelInput) codexManualModelInput.value = '';
+      if (codexPresetSelect) codexPresetSelect.value = '';
       await _refreshCodexProviderStatus();
       await _refreshAfterEndpointChange();
-      _setCodexMsg('Manual Codex model added.', 'admin-success');
+      _setCodexMsg('Codex model added.', 'admin-success');
     } catch (e) {
       _setCodexMsg('Could not add Codex model: ' + (e?.message || 'request failed'), 'admin-error');
     } finally {
@@ -1224,9 +1303,11 @@ function initEndpointForm() {
   if (codexTestBtn) codexTestBtn.addEventListener('click', _testCodexProviderChat);
   if (codexStreamTestBtn) codexStreamTestBtn.addEventListener('click', _testCodexProviderStream);
   if (codexRefreshBtn) codexRefreshBtn.addEventListener('click', _refreshCodexProviderStatus);
+  if (codexRemoveConnectorBtn) codexRemoveConnectorBtn.addEventListener('click', _removeCodexConnector);
   if (codexSignOutBtn) codexSignOutBtn.addEventListener('click', _signOutCodexProvider);
   if (codexResetBtn) codexResetBtn.addEventListener('click', _resetCodexProviderUi);
   if (codexAddModelBtn) codexAddModelBtn.addEventListener('click', _addCodexManualModel);
+  if (codexPresetSelect) codexPresetSelect.addEventListener('change', _toggleCodexCustomInput);
   if (codexManualModelInput) {
     codexManualModelInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1241,6 +1322,11 @@ function initEndpointForm() {
       if (!btn) return;
       e.preventDefault();
       _updateCodexModel(btn.dataset.codexModelAction, btn.dataset.modelId);
+    });
+    codexModelsEl.addEventListener('change', (e) => {
+      const sel = e.target.closest('[data-codex-thinking-model]');
+      if (!sel) return;
+      _updateCodexModel('set_thinking_effort', sel.dataset.codexThinkingModel, { thinking_effort: sel.value || null });
     });
   }
   _setEndpointProviderControls();

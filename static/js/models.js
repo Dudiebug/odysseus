@@ -213,6 +213,9 @@ export async function refreshModels(force = false) {
             endpointId: item.endpoint_id || null,
             offline: isOffline,
             modelType: epModelType,
+            provider: item.provider || '',
+            experimental: !!item.experimental,
+            capabilities: item.capabilities || {},
           });
         });
         // Extra (non-curated) models from server
@@ -224,6 +227,9 @@ export async function refreshModels(force = false) {
             endpointId: item.endpoint_id || null,
             offline: isOffline,
             modelType: epModelType,
+            provider: item.provider || '',
+            experimental: !!item.experimental,
+            capabilities: item.capabilities || {},
           });
         });
       });

@@ -1,9 +1,14 @@
 import asyncio
+import json
 import os
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_ENDPOINT_URL,
@@ -12,12 +17,15 @@ from src.codex_model_provider import (
     CODEX_EXPERIMENTAL_MODEL_DISPLAY,
     CodexCliChatAdapter,
     CodexModelProvider,
+    codex_recommended_models,
     load_codex_model_config,
     update_codex_model_config,
     codex_model_list_item_if_available,
     codex_model_list_item,
+    first_enabled_codex_model,
     is_codex_model_selection,
 )
+from src.llm_core import llm_call_async
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
 
 
@@ -32,6 +40,27 @@ if "core" not in sys.modules:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_codex_settings(monkeypatch, tmp_path):
+    import src.settings as settings_module
+
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "SETTINGS_FILE", str(settings_file))
+    settings_module._invalidate_caches()
+    yield
+    settings_module._invalidate_caches()
+
+
+def _fake_request(user="alice"):
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user=user),
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
 
 
 class _FakeService:
@@ -260,8 +289,35 @@ def test_codex_manual_model_config_persists_hide_disable_restore(monkeypatch, tm
     settings_module._invalidate_caches()
 
 
+def test_codex_model_config_remove_and_clear_connector():
+    update_codex_model_config(add_model="gpt-5.5")
+    update_codex_model_config(add_model="gpt-5.4")
+
+    cfg = update_codex_model_config(remove_model="gpt-5.4")
+    assert cfg["manual_models"] == ["gpt-5.5"]
+    assert first_enabled_codex_model(cfg) == "gpt-5.5"
+
+    cfg = update_codex_model_config(clear_all_models=True, connector_enabled=False)
+    assert cfg["connector_enabled"] is False
+    assert cfg["manual_models"] == []
+    assert cfg["selected_models"] == []
+
+
+def test_codex_recommended_presets_default_to_gpt_5_5_and_dedupe_selection():
+    presets = codex_recommended_models()
+
+    assert presets[0]["id"] == "gpt-5.5"
+    assert presets[0]["label"] == "GPT-5.5"
+
+    update_codex_model_config(add_model="gpt-5.5")
+    cfg = update_codex_model_config(add_model="gpt-5.5")
+
+    assert [item["id"] for item in cfg["selected_models"]] == ["gpt-5.5"]
+
+
 def test_codex_model_list_item_if_available_requires_available_status(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    update_codex_model_config(add_model="gpt-5.2-codex")
 
     available_provider, _ = _provider({
         "codex_cli_available": True,
@@ -301,6 +357,7 @@ def test_codex_model_provider_requires_sign_in_when_unauthenticated(monkeypatch)
 
 def test_codex_model_provider_reports_experimental_model_when_authenticated(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    update_codex_model_config(add_model="gpt-5.2-codex")
     provider, _ = _provider({
         "codex_cli_available": True,
         "authenticated": True,
@@ -820,6 +877,14 @@ def test_stream_parser_ignores_lifecycle_values_in_text_like_fields():
     ) == []
 
 
+def test_stream_parser_drops_reasoning_deltas_but_keeps_metrics():
+    events = CodexCliChatAdapter._events_from_json_line(
+        '{"type":"reasoning.delta","delta":"secret","usage":{"reasoning_output_tokens":41}}'
+    )
+
+    assert events == [{"type": "metrics", "data": {"reasoning_output_tokens": 41}}]
+
+
 def test_extract_message_ignores_lifecycle_json_lines():
     output = "\n".join([
         '{"type":"thread.started"}',
@@ -1129,4 +1194,204 @@ def test_status_does_not_expose_model_when_adapter_is_unsafe(monkeypatch):
 
     assert out["status"] == "unsupported_unsafe_cli_mode"
     assert out["models"] == []
-    assert out["chat_supported"] is False
+
+
+def test_group_sessions_are_protected_from_auto_sort():
+    from src.session_actions import session_protected_from_auto_sort
+
+    now = datetime.now()
+
+    assert session_protected_from_auto_sort(SimpleNamespace(
+        name="[GRP] Roundtable",
+        created_at=now - timedelta(minutes=10),
+        updated_at=None,
+    ), now=now) is True
+
+    assert session_protected_from_auto_sort(SimpleNamespace(
+        name="Fresh chat",
+        created_at=now - timedelta(seconds=30),
+        updated_at=None,
+    ), now=now) is True
+
+    assert session_protected_from_auto_sort(SimpleNamespace(
+        name="Old chat",
+        created_at=now - timedelta(minutes=5),
+        updated_at=None,
+    ), now=now) is False
+
+
+def test_llm_call_async_uses_codex_provider_for_sentinel(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+
+    calls = []
+
+    async def fake_test_chat(self, messages, model=None, reasoning_effort=None, timeout_seconds=120, odysseus_session_id=None):
+        calls.append({
+            "messages": messages,
+            "model": model,
+            "timeout_seconds": timeout_seconds,
+        })
+        return {"ok": True, "message": "codex async ok"}
+
+    monkeypatch.setattr(CodexModelProvider, "test_chat", fake_test_chat)
+
+    out = run(llm_call_async(
+        CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        "gpt-5.5",
+        [{"role": "user", "content": "Say ok"}],
+        timeout=42,
+    ))
+
+    assert out == "codex async ok"
+    assert calls == [{
+        "messages": [{"role": "user", "content": "Say ok"}],
+        "model": "gpt-5.5",
+        "timeout_seconds": 42,
+    }]
+
+
+def test_research_start_same_as_chat_uses_codex_sentinel(monkeypatch):
+    from routes import research_routes
+    import src.auth_helpers as auth_helpers
+
+    update_codex_model_config(add_model="gpt-5.5")
+
+    research_handler = SimpleNamespace(
+        _active_tasks={},
+        start_research=MagicMock(),
+    )
+    session_manager = SimpleNamespace(
+        get_session=lambda sid: SimpleNamespace(
+            endpoint_url=CODEX_EXPERIMENTAL_ENDPOINT_URL,
+            model="gpt-5.5",
+            headers={},
+            owner="alice",
+        )
+    )
+
+    monkeypatch.setattr(auth_helpers, "require_privilege", lambda request, privilege: "alice")
+    monkeypatch.setattr(
+        research_routes,
+        "resolve_endpoint",
+        lambda purpose, fallback_url="", fallback_model="", fallback_headers=None: (
+            fallback_url,
+            fallback_model,
+            fallback_headers or {},
+        ),
+    )
+
+    router = research_routes.setup_research_routes(research_handler, session_manager=session_manager)
+    target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/start")
+    body = SimpleNamespace(
+        query="Investigate Codex routing",
+        max_rounds=0,
+        search_provider=None,
+        endpoint_id=None,
+        model=None,
+        source_session_id="chat-1",
+        max_time=300,
+        extraction_timeout=None,
+        extraction_concurrency=None,
+        category=None,
+    )
+
+    out = run(target(body=body, request=_fake_request("alice")))
+
+    assert out["status"] == "running"
+    kwargs = research_handler.start_research.call_args.kwargs
+    assert kwargs["llm_endpoint"] == CODEX_EXPERIMENTAL_ENDPOINT_URL
+    assert kwargs["llm_model"] == "gpt-5.5"
+
+
+def test_research_spinoff_reuses_saved_codex_sentinel(monkeypatch, tmp_path):
+    from routes import research_routes
+
+    update_codex_model_config(add_model="gpt-5.5")
+    monkeypatch.chdir(tmp_path)
+
+    data_dir = tmp_path / "data" / "deep_research"
+    data_dir.mkdir(parents=True)
+    (data_dir / "rp-123.json").write_text(json.dumps({
+        "owner": "alice",
+        "query": "Codex research",
+        "result": "Saved report",
+        "sources": ["https://example.test"],
+        "llm_endpoint": CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        "llm_model": "gpt-5.5",
+    }), encoding="utf-8")
+
+    core_models = types.ModuleType("core.models")
+
+    class _ChatMessage:
+        def __init__(self, role, content, metadata=None):
+            self.role = role
+            self.content = content
+            self.metadata = metadata or {}
+
+    core_models.ChatMessage = _ChatMessage
+    monkeypatch.setitem(sys.modules, "core.models", core_models)
+    if "core" in sys.modules:
+        setattr(sys.modules["core"], "models", core_models)
+
+    event_bus = types.ModuleType("src.event_bus")
+    event_bus.fire_event = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "src.event_bus", event_bus)
+
+    created = {}
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.messages = []
+
+        def add_message(self, msg):
+            self.messages.append(msg)
+
+    class _SessionManager:
+        def get_session(self, sid):
+            raise KeyError(sid)
+
+        def create_session(self, session_id, name, endpoint_url, model, rag, owner):
+            created.update({
+                "session_id": session_id,
+                "name": name,
+                "endpoint_url": endpoint_url,
+                "model": model,
+                "owner": owner,
+            })
+            sess = _FakeSession()
+            created["session"] = sess
+            return sess
+
+        def save_sessions(self):
+            created["saved"] = created.get("saved", 0) + 1
+
+    research_handler = SimpleNamespace(
+        get_result=lambda session_id: None,
+        get_sources=lambda session_id: [],
+    )
+    router = research_routes.setup_research_routes(research_handler, session_manager=_SessionManager())
+    target = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/research/spinoff/{session_id}")
+
+    out = run(target(session_id="rp-123", request=_fake_request("alice")))
+
+    assert out["source_count"] == 1
+    assert created["endpoint_url"] == CODEX_EXPERIMENTAL_ENDPOINT_URL
+    assert created["model"] == "gpt-5.5"
+    assert created["owner"] == "alice"
+    assert created["session"].messages[0].metadata["research_spinoff_from"] == "rp-123"
+
+
+def test_chat_stream_codex_agent_mode_uses_structured_capability_response():
+    source = (REPO_ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+
+    assert "agent_mode_unsupported" in source
+    assert "status_code=409" in source
+
+
+def test_group_source_uses_chat_stream_and_saves_only_accumulated_text():
+    source = (REPO_ROOT / "static" / "js" / "group.js").read_text(encoding="utf-8")
+
+    assert "/api/chat_stream" in source
+    assert "if (!res.ok || !res.body)" in source
+    assert "content: accumulated" in source
