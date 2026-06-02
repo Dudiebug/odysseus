@@ -437,8 +437,9 @@ async function loadEndpoints() {
     const _renderInto = (container, indices) => {
       if (!container) return;
       const section = container.closest('.adm-ep-section');
+      const keepForCodex = container.id === 'adm-epList-api' && !!el('adm-codexProviderCard');
       if (!indices.length) {
-        if (section) section.style.display = 'none';
+        if (section) section.style.display = keepForCodex ? '' : 'none';
         container.innerHTML = '';
         return;
       }
@@ -637,6 +638,7 @@ async function _saveEpModelState(epId, panel) {
 function initEndpointForm() {
   const provider = el('adm-epProvider');
   const urlInput = el('adm-epUrl');
+  const CODEX_PROVIDER_VALUE = '__codex_cli__';
 
   // Custom provider picker — mirrors the (now hidden) <select id="adm-epProvider">
   // so the rest of this function (which reads provider.value and dispatches
@@ -666,7 +668,7 @@ function initEndpointForm() {
   if (picker && pickerBtn && pickerMenu && pickerCurrent) {
     _renderPickerMenu();
     _syncPickerCurrent();
-    if (provider.value && !urlInput.value) urlInput.value = provider.value;
+    if (provider.value && provider.value !== CODEX_PROVIDER_VALUE && !urlInput.value) urlInput.value = provider.value;
     pickerBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       pickerMenu.classList.toggle('hidden');
@@ -686,8 +688,15 @@ function initEndpointForm() {
   }
 
   provider.addEventListener('change', () => {
+    if (provider.value === CODEX_PROVIDER_VALUE) {
+      urlInput.value = '';
+      _setEndpointProviderControls();
+      _focusCodexProviderCard();
+      return;
+    }
     if (provider.value) urlInput.value = provider.value;
     else urlInput.value = '';
+    _setEndpointProviderControls();
   });
   urlInput.addEventListener('input', () => {
     if (provider.value && urlInput.value.trim() !== provider.value) {
@@ -768,12 +777,64 @@ function initEndpointForm() {
   const codexCard = el('adm-codexProviderCard');
   const codexStatusEl = el('adm-codexProviderStatus');
   const codexDetailsEl = el('adm-codexProviderDetails');
+  const codexSummaryEl = el('adm-codexProviderSummary');
   const codexModelEl = el('adm-codexProviderModel');
   const codexMsgEl = el('adm-codexProviderMsg');
+  const codexHeader = el('adm-codexProviderHeader');
+  const codexBody = el('adm-codexProviderBody');
+  const codexChevron = el('adm-codexProviderChevron');
   const codexSignInBtn = el('adm-codexSignInBtn');
   const codexTestBtn = el('adm-codexTestBtn');
   const codexRefreshBtn = el('adm-codexRefreshBtn');
   let codexProviderStatus = null;
+  let codexOpen = false;
+
+  function _isCodexProviderSelected() {
+    return provider && provider.value === CODEX_PROVIDER_VALUE;
+  }
+
+  function _setCodexOpen(open) {
+    codexOpen = !!open;
+    try { localStorage.setItem('odysseus.addModels.codex.open', codexOpen ? '1' : '0'); } catch {}
+    if (codexBody) codexBody.style.display = codexOpen ? 'flex' : 'none';
+    if (codexChevron) {
+      codexChevron.style.transform = codexOpen ? 'rotate(180deg)' : '';
+      codexChevron.style.opacity = codexOpen ? '0.7' : '0.3';
+    }
+  }
+
+  function _setEndpointProviderControls() {
+    const isCodex = _isCodexProviderSelected();
+    const apiKey = el('adm-epApiKey');
+    const type = el('adm-epType');
+    const apiTestBtn = el('adm-epApiTestBtn');
+    const addBtn = el('adm-epAddBtn');
+    if (urlInput) {
+      urlInput.disabled = isCodex;
+      urlInput.placeholder = isCodex ? 'Codex uses CLI auth, not an API endpoint URL' : 'Base URL or pick provider';
+      if (isCodex) urlInput.value = '';
+    }
+    if (apiKey) {
+      apiKey.disabled = isCodex;
+      apiKey.placeholder = isCodex ? 'Uses Codex CLI auth' : 'API key';
+      if (isCodex) apiKey.value = '';
+    }
+    if (type) type.disabled = isCodex;
+    if (apiTestBtn) apiTestBtn.disabled = isCodex;
+    if (addBtn) addBtn.disabled = isCodex;
+    if (isCodex) {
+      _setCodexOpen(true);
+      _setCodexMsg('Selected in the provider dropdown. Use this experimental card; Codex is not added as a normal endpoint yet.', '');
+    }
+  }
+
+  function _focusCodexProviderCard() {
+    if (!codexCard) return;
+    _setCodexOpen(true);
+    codexCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    codexCard.style.boxShadow = '0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent)';
+    setTimeout(() => { codexCard.style.boxShadow = ''; }, 1200);
+  }
 
   function _setCodexMsg(text, cls) {
     if (!codexMsgEl) return;
@@ -806,13 +867,17 @@ function initEndpointForm() {
 
     const streaming = data?.streaming_supported === true;
     let details = streaming
-      ? 'Experimental. Test Chat remains one-shot; JSON event streaming is only available through the experimental SSE test route. Stateless. Uses Codex CLI auth. Not added to the default model picker yet.'
-      : 'Experimental, one-shot only, stateless. Uses Codex CLI auth. Not added to the default model picker yet.';
+      ? 'Experimental. Chat picker uses the Codex CLI JSON event stream when available. Stateless. Uses Codex CLI auth. Not added as a normal API endpoint.'
+      : 'Experimental, one-shot fallback only, stateless. Uses Codex CLI auth. Not added as a normal API endpoint.';
     if (disabled) details += ' Enable ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED=true to test this provider.';
     else if (signInRequired) details += ' Sign in with Codex / ChatGPT before running the provider test.';
     else if (status === 'unsupported_unsafe_cli_mode') details += ' Test chat is blocked until the Codex CLI safety flags are available.';
     else if (status === 'cli_unavailable') details += ' Install or expose the Codex CLI in this runtime before testing.';
     codexDetailsEl.textContent = details;
+    if (codexSummaryEl) {
+      const pickerState = disabled ? 'Hidden from chat picker while disabled.' : 'Visible in the chat model picker as an experimental model.';
+      codexSummaryEl.textContent = `${pickerState} Uses Codex CLI auth; no API key is stored.`;
+    }
 
     if (codexModelEl) {
       if (model && model.id) {
@@ -908,8 +973,17 @@ function initEndpointForm() {
       _setCodexMsg('Opened Settings -> Integrations -> Codex / ChatGPT. Refresh this card after sign-in completes.', '');
     });
   }
+  try { codexOpen = localStorage.getItem('odysseus.addModels.codex.open') === '1'; } catch { codexOpen = false; }
+  _setCodexOpen(codexOpen);
+  if (codexHeader) {
+    codexHeader.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      _setCodexOpen(!codexOpen);
+    });
+  }
   if (codexTestBtn) codexTestBtn.addEventListener('click', _testCodexProviderChat);
   if (codexRefreshBtn) codexRefreshBtn.addEventListener('click', _refreshCodexProviderStatus);
+  _setEndpointProviderControls();
   _refreshCodexProviderStatus();
 
   let apiTestController = null;
@@ -919,6 +993,11 @@ function initEndpointForm() {
     apiTestBtn.addEventListener('click', async () => {
       const msg = _endpointMsg('api');
       msg.textContent = ''; msg.className = '';
+      if (_isCodexProviderSelected()) {
+        _focusCodexProviderCard();
+        _setCodexMsg('Codex test chat runs from this experimental card, not the generic endpoint tester.', '');
+        return;
+      }
       const rawUrl = (urlInput.value || provider.value).trim();
       const apiKey = el('adm-epApiKey').value.trim();
       if (!rawUrl) { msg.textContent = 'Select a provider or enter a base URL'; msg.className = 'admin-error'; return; }
@@ -964,6 +1043,11 @@ function initEndpointForm() {
   el('adm-epAddBtn').addEventListener('click', async () => {
     const msg = _endpointMsg('api');
     msg.textContent = ''; msg.className = '';
+    if (_isCodexProviderSelected()) {
+      _focusCodexProviderCard();
+      _setCodexMsg('Codex is not added as a normal API endpoint yet. Use the experimental card for status and Test Chat.', '');
+      return;
+    }
     const rawUrl = (urlInput.value || provider.value).trim();
     const apiKey = el('adm-epApiKey').value.trim();
     if (!rawUrl) { msg.textContent = 'Select a provider or enter a base URL'; msg.className = 'admin-error'; return; }

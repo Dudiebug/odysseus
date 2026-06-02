@@ -12,6 +12,7 @@ from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
 from src.context_compactor import maybe_compact, trim_for_context
+from src.codex_model_provider import is_codex_model_selection
 from src.auth_helpers import get_current_user
 from src.prompt_security import untrusted_context_message
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
@@ -434,19 +435,25 @@ async def build_chat_context(
     for transcript in preprocessed.youtube_transcripts:
         preface.append(untrusted_context_message("youtube transcript", transcript))
 
-    # Normalize model ID
-    norm = normalize_model_id(sess.endpoint_url, sess.model)
-    if norm:
-        sess.model = norm
+    if is_codex_model_selection(sess.endpoint_url, sess.model):
+        messages = preface + sess.get_context_messages()
+        context_length = 32000
+        was_compacted = False
+        messages = trim_for_context(messages, context_length)
+    else:
+        # Normalize model ID
+        norm = normalize_model_id(sess.endpoint_url, sess.model)
+        if norm:
+            sess.model = norm
 
-    # Build messages
-    messages = preface + sess.get_context_messages()
+        # Build messages
+        messages = preface + sess.get_context_messages()
 
-    # Auto-compact
-    messages, context_length, was_compacted = await maybe_compact(
-        sess, sess.endpoint_url, sess.model, messages, sess.headers,
-    )
-    messages = trim_for_context(messages, context_length)
+        # Auto-compact
+        messages, context_length, was_compacted = await maybe_compact(
+            sess, sess.endpoint_url, sess.model, messages, sess.headers,
+        )
+        messages = trim_for_context(messages, context_length)
 
     return ChatContext(
         preface=preface,

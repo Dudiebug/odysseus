@@ -17,6 +17,11 @@ from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
+from src.codex_model_provider import (
+    CODEX_EXPERIMENTAL_MODEL_ID,
+    CodexModelProvider,
+    is_codex_model_selection,
+)
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
 from src.prompt_security import untrusted_context_message
@@ -72,6 +77,8 @@ def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
 def _clear_orphaned_session_endpoint(sess) -> bool:
     """Clear a session model if its endpoint was deleted from ModelEndpoint."""
     if not getattr(sess, "endpoint_url", ""):
+        return False
+    if is_codex_model_selection(sess.endpoint_url, getattr(sess, "model", "")):
         return False
     db = SessionLocal()
     try:
@@ -168,15 +175,25 @@ def setup_chat_routes(
             except Exception as e:
                 logger.error(f"Research failed: {e}")
 
-        reply = await llm_call_async(
-            sess.endpoint_url,
-            sess.model,
-            ctx.messages,
-            headers=sess.headers,
-            temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
-            prompt_type=preset_id,
-        )
+        if is_codex_model_selection(sess.endpoint_url, sess.model):
+            result = await CodexModelProvider().test_chat(
+                ctx.messages,
+                model=sess.model or CODEX_EXPERIMENTAL_MODEL_ID,
+                odysseus_session_id=session,
+            )
+            if not result.get("ok"):
+                raise HTTPException(400, result.get("error") or "Codex provider failed")
+            reply = result.get("message") or ""
+        else:
+            reply = await llm_call_async(
+                sess.endpoint_url,
+                sess.model,
+                ctx.messages,
+                headers=sess.headers,
+                temperature=ctx.preset.temperature,
+                max_tokens=ctx.preset.max_tokens,
+                prompt_type=preset_id,
+            )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
 
@@ -682,6 +699,77 @@ def setup_chat_routes(
                     sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
                     session_manager.save_sessions()
                 yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'
+                yield "data: [DONE]\n\n"
+                _active_streams.pop(session, None)
+                return
+            elif is_codex_model_selection(sess.endpoint_url, sess.model):
+                if chat_mode != "chat":
+                    msg = "Codex / ChatGPT experimental provider is chat-only; Agent tools are not available for this model."
+                    yield f'event: error\ndata: {json.dumps({"error": msg, "status": 400})}\n\n'
+                    yield "data: [DONE]\n\n"
+                    _active_streams.pop(session, None)
+                    return
+
+                _codex_start = time.time()
+                async for event in CodexModelProvider().stream_chat(
+                    messages,
+                    model=sess.model or CODEX_EXPERIMENTAL_MODEL_ID,
+                    timeout_seconds=120,
+                    odysseus_session_id=session,
+                    allow_one_shot_fallback=True,
+                ):
+                    event_type = event.get("type")
+                    if event_type == "delta":
+                        delta = event.get("delta") or ""
+                        full_response += delta
+                        _stream_set(session, partial=full_response)
+                        yield f'data: {json.dumps({"delta": delta})}\n\n'
+                    elif event_type == "metrics":
+                        last_metrics = event.get("data") or {}
+                        last_metrics["model"] = sess.model or CODEX_EXPERIMENTAL_MODEL_ID
+                        yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                    elif event_type == "error":
+                        yield f'event: error\ndata: {json.dumps({"error": event.get("error") or "Codex provider failed", "status": event.get("status") or "codex_failed"})}\n\n'
+                    elif event_type == "done":
+                        full_response = event.get("message") or full_response
+
+                if full_response and not last_metrics:
+                    _elapsed = time.time() - _codex_start
+                    _est_in = estimate_tokens(messages)
+                    _est_out = len(full_response) // 4
+                    last_metrics = {
+                        "response_time": round(_elapsed, 2),
+                        "input_tokens": _est_in,
+                        "output_tokens": _est_out,
+                        "tokens_per_second": round(_est_out / _elapsed, 2) if _elapsed > 0 else 0,
+                        "context_percent": min(round((_est_in / ctx.context_length) * 100, 1), 100.0) if ctx.context_length else 0,
+                        "context_length": ctx.context_length,
+                        "model": sess.model or CODEX_EXPERIMENTAL_MODEL_ID,
+                        "usage_source": "estimated",
+                        "provider": "codex_cli",
+                    }
+                    yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+
+                if full_response:
+                    _saved_id = save_assistant_response(
+                        sess, session_manager, session, full_response, last_metrics,
+                        character_name=ctx.preset.character_name,
+                        web_sources=web_sources,
+                        rag_sources=ctx.rag_sources,
+                        used_memories=ctx.used_memories,
+                        do_research=do_research,
+                        incognito=incognito,
+                    )
+                    if _saved_id:
+                        yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                    run_post_response_tasks(
+                        sess, session_manager, session, message, full_response,
+                        last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                        incognito=incognito, compare_mode=compare_mode,
+                        character_name=ctx.preset.character_name,
+                        owner=_user,
+                    )
+                _stream_set(session, status="done")
                 yield "data: [DONE]\n\n"
                 _active_streams.pop(session, None)
                 return

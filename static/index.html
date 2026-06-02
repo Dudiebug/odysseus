@@ -2043,6 +2043,7 @@
                   <option value="https://api.anthropic.com" data-logo="anthropic">Anthropic</option>
                   <option value="https://api.deepseek.com/v1" data-logo="deepseek" selected>DeepSeek</option>
                   <option value="https://api.openai.com/v1" data-logo="openai">OpenAI</option>
+                  <option value="__codex_cli__" data-logo="openai">Codex / ChatGPT (Experimental)</option>
                   <option value="https://openrouter.ai/api/v1" data-logo="openrouter">OpenRouter</option>
                   <option value="https://ollama.com/api" data-logo="ollama">Ollama Cloud</option>
                   <option value="https://api.groq.com/openai/v1" data-logo="groq">Groq</option>
@@ -2064,27 +2065,6 @@
                   <button class="admin-btn-add" id="adm-epAddBtn" style="width:55px;text-align:center;">Add</button>
                 </div>
                 <div id="adm-epApiMsg" class="adm-ep-inline-msg"></div>
-                <div id="adm-codexProviderCard" class="admin-user-row" style="display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-top:10px;">
-                  <div style="display:flex;align-items:flex-start;gap:10px;">
-                    <div style="flex:1;min-width:0;">
-                      <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                        <span>Codex / ChatGPT</span>
-                        <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
-                      </div>
-                      <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
-                        Experimental, non-streaming, stateless provider using Codex CLI auth. Not added to the default model picker yet.
-                      </div>
-                    </div>
-                    <span id="adm-codexProviderStatus" class="admin-badge admin-badge-off" style="white-space:nowrap;">Checking</span>
-                  </div>
-                  <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-                    <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
-                    <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
-                    <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
-                  </div>
-                  <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
-                </div>
               </div>
             </div>
           </div>
@@ -2102,6 +2082,36 @@
               <div class="adm-ep-section-head">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                 <span>API</span>
+              </div>
+              <div id="adm-codexProviderCard" class="admin-user-row" style="display:flex;flex-direction:column;align-items:stretch;gap:8px;margin-bottom:8px;">
+                <div id="adm-codexProviderHeader" style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+                  <div style="flex:1;min-width:0;">
+                    <div class="admin-ep-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                      <span>Codex / ChatGPT</span>
+                      <span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent);">Experimental</span>
+                      <span style="font-size:10px;opacity:0.4;">Click to configure</span>
+                    </div>
+                    <div id="adm-codexProviderSummary" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
+                      Uses Codex CLI auth. Experimental chat model picker entry.
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;align-items:center;">
+                    <span id="adm-codexProviderStatus" class="admin-badge admin-badge-off" style="white-space:nowrap;">Checking</span>
+                    <svg id="adm-codexProviderChevron" class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>
+                  </div>
+                </div>
+                <div id="adm-codexProviderBody" style="display:none;flex-direction:column;gap:8px;">
+                  <div id="adm-codexProviderDetails" class="admin-ep-detail" style="white-space:normal;line-height:1.35;">
+                    Experimental, one-shot only, stateless provider using Codex CLI auth.
+                  </div>
+                  <div id="adm-codexProviderModel" class="admin-ep-detail" style="display:none;white-space:normal;"></div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    <button type="button" class="admin-btn-sm" id="adm-codexSignInBtn">Open Codex sign-in</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexTestBtn">Test Chat</button>
+                    <button type="button" class="admin-btn-sm" id="adm-codexRefreshBtn" style="opacity:0.75;">Refresh</button>
+                  </div>
+                  <div id="adm-codexProviderMsg" class="adm-ep-inline-msg"></div>
+                </div>
               </div>
               <div id="adm-epList-api"></div>
             </div>

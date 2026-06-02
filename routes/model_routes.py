@@ -583,6 +583,14 @@ def setup_model_routes(model_discovery):
                     "offline": True,
                 })
 
+        try:
+            from src.codex_model_provider import codex_model_list_item_if_available
+            codex_item = codex_model_list_item_if_available()
+            if codex_item:
+                items.append(codex_item)
+        except Exception:
+            pass
+
         return {"hosts": [], "items": items}
 
     @router.get("/models")

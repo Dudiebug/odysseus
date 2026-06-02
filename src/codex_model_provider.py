@@ -1,8 +1,8 @@
 """Experimental Codex CLI model-provider capability boundary.
 
-This module does not implement chat dispatch. It reports whether a future
-Codex-backed provider can be exposed safely, without treating completed CLI
-output as token streaming or reading Codex credential files.
+This module implements the experimental Codex CLI provider boundary without
+reading Codex credential files or treating completed CLI output as token
+streaming. Normal API-provider behavior remains deliberately out of scope.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from src.codex_auth import get_codex_auth_service
 CODEX_MODEL_PROVIDER_FLAG = "ODYSSEUS_CODEX_MODEL_PROVIDER_ENABLED"
 CODEX_EXPERIMENTAL_MODEL_ID = "codex-cli/chatgpt-experimental"
 CODEX_EXPERIMENTAL_MODEL_DISPLAY = "Codex CLI / ChatGPT (experimental)"
+CODEX_EXPERIMENTAL_ENDPOINT_URL = "odysseus://codex-cli"
 CODEX_CHAT_TIMEOUT_SECONDS = 120
 
 _TOKEN_PATTERNS = (
@@ -30,7 +31,7 @@ _TOKEN_PATTERNS = (
 )
 
 _BASE_LIMITATIONS = [
-    "Normal chat integration is not implemented.",
+    "Experimental chat picker integration only; not a normal API endpoint.",
     "Stateless: session/resume is not implemented.",
     "Codex tool execution is not mapped into Odysseus agent rounds.",
     "The adapter requires Codex CLI sandbox support and runs with read-only sandbox mode.",
@@ -43,6 +44,17 @@ _JSON_OUTPUT_FLAG = "--json"
 _STREAM_TEXT_KEYS = ("delta", "text", "content", "message")
 _STREAM_NESTED_KEYS = ("event", "type", "item", "output", "data")
 _STREAM_METRIC_KEYS = ("metrics", "usage")
+_LIFECYCLE_EVENT_NAMES = {
+    "started",
+    "completed",
+    "failed",
+    "thread.started",
+    "thread.completed",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+}
+_LIFECYCLE_EVENT_SUFFIXES = (".started", ".completed", ".failed")
 _TRUST_DIRECTORY_PATTERNS = (
     re.compile(r"not\s+(inside\s+)?(a\s+)?trusted\s+(directory|git\s+repository)", re.I),
     re.compile(r"trust(ed)?\s+directory", re.I),
@@ -56,6 +68,35 @@ def _truthy(value: str | None) -> bool:
 
 def codex_model_provider_enabled() -> bool:
     return _truthy(os.getenv(CODEX_MODEL_PROVIDER_FLAG, "false"))
+
+
+def is_codex_model_selection(endpoint_url: str | None, model: str | None = None) -> bool:
+    return (endpoint_url or "").strip() == CODEX_EXPERIMENTAL_ENDPOINT_URL or (
+        (model or "").strip() == CODEX_EXPERIMENTAL_MODEL_ID
+    )
+
+
+def codex_model_list_item() -> dict[str, Any]:
+    return {
+        "host": "codex",
+        "port": 0,
+        "url": CODEX_EXPERIMENTAL_ENDPOINT_URL,
+        "models": [CODEX_EXPERIMENTAL_MODEL_ID],
+        "models_display": ["Codex / ChatGPT"],
+        "models_extra": [],
+        "models_extra_display": [],
+        "endpoint_id": None,
+        "endpoint_name": "Codex / ChatGPT",
+        "category": "api",
+        "model_type": "llm",
+        "experimental": True,
+        "provider": "codex_cli",
+    }
+
+
+def _looks_like_lifecycle_event_name(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and (text in _LIFECYCLE_EVENT_NAMES or text.endswith(_LIFECYCLE_EVENT_SUFFIXES))
 
 
 def _sanitize_text(text: str | None, limit: int = 2000, *, strip: bool = True) -> str:
@@ -311,6 +352,7 @@ class CodexCliChatAdapter:
         model: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
+        allow_one_shot_fallback: bool = False,
     ):
         started = time.time()
         availability = await self._available_internal()
@@ -325,6 +367,26 @@ class CodexCliChatAdapter:
         preflight = availability["_preflight"]
         capabilities = availability["_capabilities"]
         if not capabilities.streaming_supported:
+            if allow_one_shot_fallback:
+                result = await self.complete(
+                    messages,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                    odysseus_session_id=odysseus_session_id,
+                )
+                if result.get("ok"):
+                    message = result.get("message") or ""
+                    if message:
+                        yield {"type": "delta", "delta": message}
+                    yield {
+                        "type": "done",
+                        "message": message,
+                        "model": result.get("model") or model or CODEX_EXPERIMENTAL_MODEL_ID,
+                        "duration_ms": result.get("duration_ms"),
+                    }
+                else:
+                    yield self._stream_error_event(result, started=started, model=model)
+                return
             yield self._stream_error_event(
                 {
                     "ok": False,
@@ -571,6 +633,8 @@ class CodexCliChatAdapter:
             data = json.loads(stripped)
         except Exception:
             return []
+        if cls._is_lifecycle_event(data):
+            return []
 
         events: list[dict[str, Any]] = []
         metrics = cls._extract_metrics(data)
@@ -582,11 +646,25 @@ class CodexCliChatAdapter:
         return events
 
     @classmethod
+    def _is_lifecycle_event(cls, value: Any) -> bool:
+        if isinstance(value, list):
+            return any(cls._is_lifecycle_event(item) for item in value)
+        if not isinstance(value, dict):
+            return _looks_like_lifecycle_event_name(value)
+        for key in ("type", "event"):
+            event_name = value.get(key)
+            if isinstance(event_name, str) and _looks_like_lifecycle_event_name(event_name):
+                return True
+        return False
+
+    @classmethod
     def _extract_delta(cls, value: Any, depth: int = 0) -> str:
         if depth > 6:
             return ""
         if isinstance(value, str):
-            return value if depth > 0 else ""
+            if depth > 0 and not _looks_like_lifecycle_event_name(value):
+                return value
+            return ""
         if isinstance(value, list):
             for item in value:
                 found = cls._extract_delta(item, depth + 1)
@@ -597,7 +675,7 @@ class CodexCliChatAdapter:
             return ""
         for key in _STREAM_TEXT_KEYS:
             text = value.get(key)
-            if isinstance(text, str) and text.strip():
+            if isinstance(text, str) and text.strip() and not _looks_like_lifecycle_event_name(text):
                 return text
         for key in _STREAM_NESTED_KEYS:
             nested = value.get(key)
@@ -605,7 +683,9 @@ class CodexCliChatAdapter:
                 found = cls._extract_delta(nested, depth + 1)
                 if found:
                     return found
-        for nested in value.values():
+        for key, nested in value.items():
+            if key in {"type", "event"} or not isinstance(nested, (dict, list)):
+                continue
             found = cls._extract_delta(nested, depth + 1)
             if found:
                 return found
@@ -714,18 +794,35 @@ class CodexCliChatAdapter:
         if not text:
             return ""
         # If a future CLI emits JSONL, prefer common completed-message fields.
+        parsed_json = False
+        non_json_lines: list[str] = []
         for line in text.splitlines():
             line = line.strip()
             if not line.startswith("{"):
+                if line:
+                    non_json_lines.append(line)
                 continue
             try:
                 data = json.loads(line)
             except Exception:
+                non_json_lines.append(line)
                 continue
+            parsed_json = True
+            if CodexCliChatAdapter._is_lifecycle_event(data):
+                continue
+            delta = CodexCliChatAdapter._extract_delta(data)
+            if delta:
+                return _sanitize_text(delta)
             for key in ("message", "content", "text", "output"):
                 value = data.get(key) if isinstance(data, dict) else None
-                if isinstance(value, str) and value.strip():
+                if (
+                    isinstance(value, str)
+                    and value.strip()
+                    and not _looks_like_lifecycle_event_name(value)
+                ):
                     return _sanitize_text(value)
+        if parsed_json:
+            return _sanitize_text("\n".join(non_json_lines))
         return text
 
     @staticmethod
@@ -868,14 +965,41 @@ class CodexModelProvider:
         model: str | None = None,
         timeout_seconds: int = CODEX_CHAT_TIMEOUT_SECONDS,
         odysseus_session_id: str | None = None,
+        allow_one_shot_fallback: bool = False,
     ):
         async for event in self._chat_adapter.stream_chat(
             messages,
             model=model,
             timeout_seconds=timeout_seconds,
             odysseus_session_id=odysseus_session_id,
+            allow_one_shot_fallback=allow_one_shot_fallback,
         ):
             yield event
+
+
+def codex_model_list_item_if_available(provider: CodexModelProvider | None = None) -> dict[str, Any] | None:
+    """Return the synthetic picker item only when Codex is actually usable."""
+    if not codex_model_provider_enabled():
+        return None
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = False
+    else:
+        running_loop = True
+    if running_loop:
+        return None
+    try:
+        status = asyncio.run((provider or CodexModelProvider()).status())
+    except Exception:
+        return None
+    if (
+        status.get("status") == "available"
+        and status.get("chat_supported") is True
+        and status.get("models")
+    ):
+        return codex_model_list_item()
+    return None
 
 
 def _is_trust_directory_error(text: str | None) -> bool:

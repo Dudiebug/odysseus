@@ -2,16 +2,24 @@ import asyncio
 import os
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.codex_model_provider import (
+    CODEX_EXPERIMENTAL_ENDPOINT_URL,
     CODEX_EXPERIMENTAL_MODEL_ID,
     CODEX_MODEL_PROVIDER_FLAG,
     CODEX_EXPERIMENTAL_MODEL_DISPLAY,
     CodexCliChatAdapter,
     CodexModelProvider,
+    codex_model_list_item_if_available,
+    codex_model_list_item,
+    is_codex_model_selection,
 )
 from routes.codex_model_provider_routes import setup_codex_model_provider_routes
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 if "core" not in sys.modules:
@@ -65,7 +73,14 @@ class _FakeAdapter:
             "tool_execution_allowed": False,
         }
 
-    async def stream_chat(self, messages, model=None, timeout_seconds=120, odysseus_session_id=None):
+    async def stream_chat(
+        self,
+        messages,
+        model=None,
+        timeout_seconds=120,
+        odysseus_session_id=None,
+        allow_one_shot_fallback=False,
+    ):
         yield {"type": "delta", "delta": "mock stream"}
         yield {"type": "done", "message": "mock stream", "model": model or CODEX_EXPERIMENTAL_MODEL_ID}
 
@@ -164,6 +179,38 @@ def test_codex_model_provider_hidden_when_flag_disabled(monkeypatch):
     assert out["status"] == "disabled"
     assert out["models"] == []
     assert svc.calls == 0
+
+
+def test_codex_model_list_item_is_synthetic_not_db_endpoint():
+    item = codex_model_list_item()
+
+    assert item["url"] == CODEX_EXPERIMENTAL_ENDPOINT_URL
+    assert item["models"] == [CODEX_EXPERIMENTAL_MODEL_ID]
+    assert item["endpoint_id"] is None
+    assert item["experimental"] is True
+    assert is_codex_model_selection(item["url"], item["models"][0]) is True
+
+
+def test_codex_model_list_item_if_available_requires_available_status(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+
+    available_provider, _ = _provider({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+    signed_out_provider, _ = _provider({
+        "codex_cli_available": True,
+        "authenticated": False,
+        "status": "not_authenticated",
+    })
+
+    assert codex_model_list_item_if_available(available_provider)["url"] == CODEX_EXPERIMENTAL_ENDPOINT_URL
+    assert codex_model_list_item_if_available(signed_out_provider) is None
+
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "false")
+    assert codex_model_list_item_if_available(available_provider) is None
 
 
 def test_codex_model_provider_requires_sign_in_when_unauthenticated(monkeypatch):
@@ -526,6 +573,99 @@ def test_adapter_streams_json_events_with_safe_args(monkeypatch):
     assert "--yolo" not in exec_args
 
 
+def test_adapter_stream_ignores_lifecycle_events(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        return await _codex_help_runner(
+            args,
+            timeout,
+            cwd=cwd,
+            env=env,
+            exec_help=CODEX_0135_EXEC_HELP_WITH_SKIP,
+        )
+
+    async def fake_create_subprocess_exec(*args, stdout=None, stderr=None, cwd=None, env=None):
+        return _FakeProcess([
+            b'{"type":"thread.started"}\n',
+            b'{"event":"turn.started"}\n',
+            b'{"type":"response.output_text.delta","delta":"clean "}\n',
+            b'{"type":"turn.completed"}\n',
+            b'{"event":"request.completed"}\n',
+            b'{"type":"delta","data":{"text":"answer"}}\n',
+            b'{"type":"metrics","usage":{"input_tokens":1,"output_tokens":2}}\n',
+        ])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    events = run(_collect(adapter.stream_chat([{"role": "user", "content": "Say ok"}], timeout_seconds=5)))
+
+    assert [event["type"] for event in events] == ["delta", "delta", "metrics", "done"]
+    assert [event["delta"] for event in events if event["type"] == "delta"] == ["clean ", "answer"]
+    assert events[-1]["message"] == "clean answer"
+    assert "thread.started" not in str(events)
+    assert "turn.started" not in str(events)
+    assert "turn.completed" not in str(events)
+
+
+def test_extract_message_ignores_lifecycle_json_lines():
+    output = "\n".join([
+        '{"type":"thread.started"}',
+        '{"event":"turn.started"}',
+        '{"type":"request.completed"}',
+        '{"message":"final answer"}',
+        '{"type":"turn.completed"}',
+    ])
+
+    assert CodexCliChatAdapter._extract_message(output) == "final answer"
+
+
+def test_adapter_stream_signed_out_returns_clean_error(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": False,
+        "status": "not_authenticated",
+    })
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=_codex_help_runner)
+    events = run(_collect(adapter.stream_chat(
+        [{"role": "user", "content": "Say ok"}],
+        timeout_seconds=5,
+        allow_one_shot_fallback=True,
+    )))
+
+    assert events[0]["type"] == "error"
+    assert events[0]["status"] == "sign_in_required"
+    assert "sign in" in events[0]["error"].lower()
+    assert "503" not in str(events[0])
+
+
+def test_normal_chat_routes_use_explicit_codex_branches_before_generic_llm():
+    source = (REPO_ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+
+    non_stream_branch = source.index("if is_codex_model_selection(sess.endpoint_url, sess.model):")
+    generic_non_stream = source.index("reply = await llm_call_async(", non_stream_branch)
+    assert non_stream_branch < generic_non_stream
+    assert "CodexModelProvider().test_chat(" in source[non_stream_branch:generic_non_stream]
+
+    stream_branch = source.index("elif is_codex_model_selection(sess.endpoint_url, sess.model):")
+    generic_stream = source.index("elif chat_mode == \"chat\":", stream_branch)
+    assert stream_branch < generic_stream
+    branch_source = source[stream_branch:generic_stream]
+    assert "if chat_mode != \"chat\":" in branch_source
+    assert "Agent tools are not available" in branch_source
+    assert "CodexModelProvider().stream_chat(" in branch_source
+    assert "allow_one_shot_fallback=True" in branch_source
+
+
 def test_adapter_stream_falls_back_to_completed_stdout_when_no_deltas(monkeypatch):
     monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
     svc = _FakeService({
@@ -575,6 +715,34 @@ def test_adapter_stream_reports_not_supported_without_json(monkeypatch):
     assert available["cli_capabilities"]["json_output_supported"] is False
     assert events[0]["type"] == "error"
     assert events[0]["status"] == "streaming_not_supported"
+
+
+def test_adapter_stream_can_use_one_shot_fallback_without_json(monkeypatch):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        if args[1:] == ["exec", "--help"]:
+            return 0, "Usage: codex exec --sandbox <MODE>", ""
+        if args[1:] == ["--help"]:
+            return 0, CODEX_0135_ROOT_HELP, ""
+        return 0, "one shot response", ""
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    events = run(_collect(adapter.stream_chat(
+        [{"role": "user", "content": "Say ok"}],
+        timeout_seconds=5,
+        allow_one_shot_fallback=True,
+    )))
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "one shot response"
+    assert events[1]["message"] == "one shot response"
 
 
 def test_adapter_handles_timeout(monkeypatch):

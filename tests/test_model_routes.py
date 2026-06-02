@@ -1,6 +1,7 @@
 """Tests for model route helper functions — pure logic, no server needed."""
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -26,6 +27,7 @@ if "core.database" not in sys.modules:
 
 import routes.model_routes as model_routes
 import src.endpoint_resolver as endpoint_resolver
+import src.codex_model_provider as codex_model_provider
 from routes.model_routes import (
     _match_provider_curated,
     _curate_models,
@@ -35,6 +37,7 @@ from routes.model_routes import (
     _truthy,
     _PROVIDER_CURATED,
 )
+from src.codex_model_provider import CODEX_EXPERIMENTAL_ENDPOINT_URL, CODEX_EXPERIMENTAL_MODEL_ID
 from src.llm_core import ANTHROPIC_MODELS
 
 
@@ -296,3 +299,82 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
 
         assert _probe_endpoint("https://api.anthropic.com/v1") == ANTHROPIC_MODELS
+
+
+class _EmptyQuery:
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return []
+
+
+class _EmptyDb:
+    def query(self, *args, **kwargs):
+        return _EmptyQuery()
+
+    def close(self):
+        pass
+
+
+def _api_models_endpoint():
+    router = model_routes.setup_model_routes(None)
+    for route in router.routes:
+        if getattr(route, "path", "") == "/api/models" and "GET" in getattr(route, "methods", set()):
+            return route.endpoint
+    raise AssertionError("GET /api/models route not found")
+
+
+def _request():
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user=""),
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
+    )
+
+
+def test_api_models_excludes_codex_when_feature_flag_off(monkeypatch):
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _EmptyDb())
+    monkeypatch.delenv(codex_model_provider.CODEX_MODEL_PROVIDER_FLAG, raising=False)
+
+    out = _api_models_endpoint()(_request(), refresh=True)
+
+    urls = [item.get("url") for item in out["items"]]
+    models = [model for item in out["items"] for model in item.get("models", [])]
+    assert CODEX_EXPERIMENTAL_ENDPOINT_URL not in urls
+    assert CODEX_EXPERIMENTAL_MODEL_ID not in models
+
+
+def test_api_models_includes_codex_when_feature_enabled_and_available(monkeypatch):
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _EmptyDb())
+    monkeypatch.setenv(codex_model_provider.CODEX_MODEL_PROVIDER_FLAG, "true")
+    monkeypatch.setattr(
+        codex_model_provider,
+        "codex_model_list_item_if_available",
+        lambda: codex_model_provider.codex_model_list_item(),
+    )
+
+    out = _api_models_endpoint()(_request(), refresh=True)
+
+    codex_items = [
+        item for item in out["items"]
+        if item.get("url") == CODEX_EXPERIMENTAL_ENDPOINT_URL
+    ]
+    assert len(codex_items) == 1
+    assert codex_items[0]["models"] == [CODEX_EXPERIMENTAL_MODEL_ID]
+
+
+def test_api_models_excludes_codex_when_feature_enabled_but_signed_out(monkeypatch):
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _EmptyDb())
+    monkeypatch.setenv(codex_model_provider.CODEX_MODEL_PROVIDER_FLAG, "true")
+    monkeypatch.setattr(codex_model_provider, "codex_model_list_item_if_available", lambda: None)
+
+    out = _api_models_endpoint()(_request(), refresh=True)
+
+    urls = [item.get("url") for item in out["items"]]
+    models = [model for item in out["items"] for model in item.get("models", [])]
+    assert CODEX_EXPERIMENTAL_ENDPOINT_URL not in urls
+    assert CODEX_EXPERIMENTAL_MODEL_ID not in models
