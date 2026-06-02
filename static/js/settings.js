@@ -3262,7 +3262,7 @@ async function initUnifiedIntegrations() {
       items.push({
         type: 'codex',
         id: '__codex__',
-        name: 'Codex connector',
+        name: 'Codex / ChatGPT',
         detail: codexDetail,
         enabled: codexAuthed,
         data: codexRes,
@@ -4443,8 +4443,8 @@ async function initUnifiedIntegrations() {
   async function showCodexForm() {
     formEl.innerHTML = `
       <div class="admin-card" id="codex-auth-card" style="margin-top:8px">
-        <h2 style="font-size:13px">${INTG_TYPES.codex.icon} Codex connector</h2>
-        <div class="admin-toggle-sub" style="margin-bottom:8px">Sign in through the official Codex CLI device-code flow.</div>
+        <h2 style="font-size:13px">${INTG_TYPES.codex.icon} Codex / ChatGPT</h2>
+        <div class="admin-toggle-sub" style="margin-bottom:8px">Sign in with ChatGPT through the official Codex CLI device-code flow.</div>
         <div id="codex-auth-status" style="font-size:12px;opacity:0.75;margin-bottom:8px;">Checking status...</div>
         <div id="codex-auth-diagnostics" class="hidden" style="font-size:10px;opacity:0.65;margin:-2px 0 8px 0;line-height:1.35;word-break:break-word;"></div>
         <div id="codex-auth-device" class="hidden" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;background:color-mix(in srgb, var(--panel) 70%, transparent);">
