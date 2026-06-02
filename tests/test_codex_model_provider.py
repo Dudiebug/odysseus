@@ -169,6 +169,33 @@ class _FakeProcess:
         self.killed = True
 
 
+def _stream_events_from_lines(monkeypatch, lines):
+    monkeypatch.setenv(CODEX_MODEL_PROVIDER_FLAG, "true")
+    svc = _FakeService({
+        "codex_cli_available": True,
+        "authenticated": True,
+        "codex_authenticated": True,
+        "status": "authenticated",
+    })
+
+    async def runner(args, timeout, cwd=None, env=None):
+        return await _codex_help_runner(
+            args,
+            timeout,
+            cwd=cwd,
+            env=env,
+            exec_help=CODEX_0135_EXEC_HELP_WITH_SKIP,
+        )
+
+    async def fake_create_subprocess_exec(*args, stdout=None, stderr=None, cwd=None, env=None):
+        return _FakeProcess([line if isinstance(line, bytes) else line.encode("utf-8") for line in lines])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    adapter = CodexCliChatAdapter(lambda: svc, runner=runner)
+    return run(_collect(adapter.stream_chat([{"role": "user", "content": "Say ok"}], timeout_seconds=5)))
+
+
 def test_codex_model_provider_hidden_when_flag_disabled(monkeypatch):
     monkeypatch.delenv(CODEX_MODEL_PROVIDER_FLAG, raising=False)
     provider, svc = _provider({"codex_cli_available": True, "authenticated": True})
@@ -613,6 +640,87 @@ def test_adapter_stream_ignores_lifecycle_events(monkeypatch):
     assert "thread.started" not in str(events)
     assert "turn.started" not in str(events)
     assert "turn.completed" not in str(events)
+
+
+def test_adapter_streams_prompt_sample_delta_and_metrics(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"type":"thread.started"}\n',
+        '{"type":"turn.started"}\n',
+        '{"type":"message.delta","delta":"odysseus streaming ok"}\n',
+        '{"type":"metrics","usage":{"input_tokens":10,"output_tokens":3}}\n',
+        '{"type":"turn.completed"}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["delta", "metrics", "done"]
+    assert events[0]["delta"] == "odysseus streaming ok"
+    assert events[1]["data"] == {"input_tokens": 10, "output_tokens": 3}
+    assert events[-1]["message"] == "odysseus streaming ok"
+    assert "thread.started" not in events[-1]["message"]
+    assert "turn.started" not in events[-1]["message"]
+    assert "turn.completed" not in events[-1]["message"]
+
+
+def test_adapter_streams_event_data_delta_shape(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"event":"response.output_text.delta","data":{"delta":"odysseus streaming ok"}}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "odysseus streaming ok"
+    assert events[-1]["message"] == "odysseus streaming ok"
+
+
+def test_adapter_streams_final_only_message_completed_content(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"type":"message.completed","message":{"content":[{"type":"text","text":"odysseus streaming ok"}]}}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "odysseus streaming ok"
+    assert events[-1]["message"] == "odysseus streaming ok"
+
+
+def test_adapter_streams_nested_content_on_lifecycle_event(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"type":"turn.completed","item":{"content":[{"type":"output_text","text":"odysseus streaming ok"}]}}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "odysseus streaming ok"
+    assert events[-1]["message"] == "odysseus streaming ok"
+    assert "turn.completed" not in events[-1]["message"]
+
+
+def test_adapter_stream_malformed_json_lines_do_not_crash(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"type":"thread.started"}\n',
+        '{"type":"message.delta","delta":\n',
+        '{"type":"message.delta","delta":"odysseus streaming ok"}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["delta"] == "odysseus streaming ok"
+    assert events[-1]["message"] == "odysseus streaming ok"
+
+
+def test_adapter_stream_lifecycle_only_returns_empty_response(monkeypatch):
+    events = _stream_events_from_lines(monkeypatch, [
+        '{"type":"thread.started"}\n',
+        '{"event":"turn.started"}\n',
+        '{"type":"turn.completed"}\n',
+    ])
+
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["status"] == "empty_response"
+    assert "thread.started" not in str(events[0])
+    assert "turn.started" not in str(events[0])
+    assert "turn.completed" not in str(events[0])
+
+
+def test_stream_parser_ignores_lifecycle_values_in_text_like_fields():
+    assert CodexCliChatAdapter._events_from_json_line(
+        '{"type":"message.delta","message":"thread.started","text":"turn.started","delta":"turn.completed"}'
+    ) == []
 
 
 def test_extract_message_ignores_lifecycle_json_lines():

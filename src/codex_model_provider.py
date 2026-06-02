@@ -41,8 +41,8 @@ _APPROVAL_FLAGS = ("--ask-for-approval", "--approval-policy", "--approval")
 _DANGEROUS_FLAGS = ("--dangerously-bypass-approvals-and-sandbox", "--yolo")
 _SKIP_GIT_REPO_CHECK_FLAG = "--skip-git-repo-check"
 _JSON_OUTPUT_FLAG = "--json"
-_STREAM_TEXT_KEYS = ("delta", "text", "content", "message")
-_STREAM_NESTED_KEYS = ("event", "type", "item", "output", "data")
+_STREAM_CONTAINER_KEYS = ("message", "item", "data", "response")
+_STREAM_NESTED_KEYS = (*_STREAM_CONTAINER_KEYS, "output")
 _STREAM_METRIC_KEYS = ("metrics", "usage")
 _LIFECYCLE_EVENT_NAMES = {
     "started",
@@ -633,8 +633,6 @@ class CodexCliChatAdapter:
             data = json.loads(stripped)
         except Exception:
             return []
-        if cls._is_lifecycle_event(data):
-            return []
 
         events: list[dict[str, Any]] = []
         metrics = cls._extract_metrics(data)
@@ -648,48 +646,72 @@ class CodexCliChatAdapter:
     @classmethod
     def _is_lifecycle_event(cls, value: Any) -> bool:
         if isinstance(value, list):
-            return any(cls._is_lifecycle_event(item) for item in value)
+            return bool(value) and all(cls._is_lifecycle_event(item) for item in value)
         if not isinstance(value, dict):
             return _looks_like_lifecycle_event_name(value)
         for key in ("type", "event"):
             event_name = value.get(key)
             if isinstance(event_name, str) and _looks_like_lifecycle_event_name(event_name):
-                return True
+                content = cls._extract_delta(value)
+                metrics = cls._extract_metrics(value)
+                return not content and not metrics
         return False
 
     @classmethod
-    def _extract_delta(cls, value: Any, depth: int = 0) -> str:
+    def _extract_delta(cls, value: Any, depth: int = 0, *, in_content: bool = False) -> str:
         if depth > 6:
             return ""
         if isinstance(value, str):
-            if depth > 0 and not _looks_like_lifecycle_event_name(value):
+            if in_content and cls._is_assistant_text(value):
                 return value
             return ""
         if isinstance(value, list):
+            parts: list[str] = []
             for item in value:
-                found = cls._extract_delta(item, depth + 1)
+                found = cls._extract_delta(item, depth + 1, in_content=in_content)
                 if found:
-                    return found
-            return ""
+                    parts.append(found)
+            return "".join(parts)
         if not isinstance(value, dict):
             return ""
-        for key in _STREAM_TEXT_KEYS:
+
+        event_type = str(value.get("type") or "").strip().lower()
+        if event_type in {"text", "output_text"}:
+            for key in ("text", "output_text", "content"):
+                text = value.get(key)
+                if isinstance(text, str) and cls._is_assistant_text(text):
+                    return text
+
+        for key in ("delta", "output_text", "text"):
             text = value.get(key)
-            if isinstance(text, str) and text.strip() and not _looks_like_lifecycle_event_name(text):
+            if isinstance(text, str) and cls._is_assistant_text(text):
                 return text
-        for key in _STREAM_NESTED_KEYS:
+
+        content = value.get("content")
+        if isinstance(content, str) and cls._is_assistant_text(content):
+            return content
+        if isinstance(content, (dict, list)):
+            found = cls._extract_delta(content, depth + 1, in_content=True)
+            if found:
+                return found
+
+        for key in _STREAM_CONTAINER_KEYS:
             nested = value.get(key)
             if isinstance(nested, (dict, list)):
                 found = cls._extract_delta(nested, depth + 1)
                 if found:
                     return found
         for key, nested in value.items():
-            if key in {"type", "event"} or not isinstance(nested, (dict, list)):
+            if key in {"type", "event", "status"} or not isinstance(nested, (dict, list)):
                 continue
             found = cls._extract_delta(nested, depth + 1)
             if found:
                 return found
         return ""
+
+    @staticmethod
+    def _is_assistant_text(value: str) -> bool:
+        return bool(value.strip()) and not _looks_like_lifecycle_event_name(value)
 
     @classmethod
     def _extract_metrics(cls, value: Any, depth: int = 0) -> dict[str, Any]:
@@ -704,8 +726,6 @@ class CodexCliChatAdapter:
         if not isinstance(value, dict):
             return {}
         event_type = str(value.get("type") or value.get("event") or "").lower()
-        if event_type in {"metrics", "metric", "usage"}:
-            return cls._sanitize_metrics(value)
         for key in _STREAM_METRIC_KEYS:
             metrics = value.get(key)
             if isinstance(metrics, dict):
@@ -714,6 +734,12 @@ class CodexCliChatAdapter:
             found = cls._extract_metrics(value.get(key), depth + 1)
             if found:
                 return found
+        if event_type in {"metrics", "metric", "usage"}:
+            return cls._sanitize_metrics({
+                key: metric_value
+                for key, metric_value in value.items()
+                if key not in {"type", "event"}
+            })
         return {}
 
     @staticmethod
@@ -813,6 +839,8 @@ class CodexCliChatAdapter:
             delta = CodexCliChatAdapter._extract_delta(data)
             if delta:
                 return _sanitize_text(delta)
+            if CodexCliChatAdapter._extract_metrics(data):
+                continue
             for key in ("message", "content", "text", "output"):
                 value = data.get(key) if isinstance(data, dict) else None
                 if (
