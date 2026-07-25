@@ -27,6 +27,7 @@ from src.tool_security import (
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
+from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
 from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
@@ -575,6 +576,7 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    security_context: Optional[ToolRunSecurityContext] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -582,6 +584,18 @@ async def execute_tool_block(
     cwd confine to it) for the duration of this call, then delegate. Reset on the
     way out so the binding never leaks to the next tool call.
     """
+    if security_context is not None:
+        decision = security_context.decision_for(getattr(block, "tool_type", None))
+        if not decision.allowed:
+            logger.warning(
+                "External-context policy blocked tool=%r",
+                getattr(block, "tool_type", None),
+            )
+            return blocked_tool_result(
+                getattr(block, "tool_type", None),
+                decision.reason or "Tool blocked by external-context policy.",
+            )
+
     token = _active_workspace.set(workspace or None)
     try:
         output = await _execute_tool_block_impl(
@@ -592,6 +606,11 @@ async def execute_tool_block(
             progress_cb=progress_cb,
             tool_policy=tool_policy,
         )
+        if security_context is not None:
+            security_context.observe_tool_result(
+                getattr(block, "tool_type", None),
+                output[1],
+            )
         return output
     finally:
         _active_workspace.reset(token)
