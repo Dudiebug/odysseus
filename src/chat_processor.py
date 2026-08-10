@@ -465,6 +465,7 @@ class ChatProcessor:
                     preface.append(untrusted_context_message(
                         f"web page: {url}",
                         f"Content from {url}:\n\n{content}",
+                        provenance_origin="external",
                     ))
 
         # Skills index — progressive disclosure. Only injected when the

@@ -280,6 +280,7 @@ _EXTERNAL_MESSAGE_SOURCES = frozenset(
         "youtube transcript",
     }
 )
+_EXTERNAL_MESSAGE_SOURCE_PREFIXES = ("web page:",)
 
 
 def messages_contain_external_untrusted_context(messages: Iterable[dict]) -> bool:
@@ -293,7 +294,12 @@ def messages_contain_external_untrusted_context(messages: Iterable[dict]) -> boo
         if metadata.get("provenance_origin") == "external":
             return True
         source = metadata.get("source")
-        if isinstance(source, str) and source.strip().casefold() in _EXTERNAL_MESSAGE_SOURCES:
+        if not isinstance(source, str):
+            continue
+        normalized_source = source.strip().casefold()
+        if normalized_source in _EXTERNAL_MESSAGE_SOURCES:
+            return True
+        if normalized_source.startswith(_EXTERNAL_MESSAGE_SOURCE_PREFIXES):
             return True
     return False
 
