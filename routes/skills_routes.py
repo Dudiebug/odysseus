@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from services.memory.skills import SkillsManager
 from src.auth_helpers import get_current_user
+from src.prompt_security import untrusted_context_message
 from core.middleware import require_admin
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,23 @@ def _skill_test_task(skill: dict) -> str:
         "example yourself. THEN apply the skill fully to that example and show the "
         "result. Context for when this skill is used: " + (ctx or "(general)")
     )
+
+
+def _skill_test_messages(md: str, task: str) -> list[dict]:
+    """Keep user-editable skill text out of the trusted system role."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are TESTING a skill. Follow the supplied reusable procedure "
+                "to complete the user's task for real, using available tools step "
+                "by step. If the skill is wrong, unclear, or references tools that "
+                "do not exist, do your best; the problems will be reviewed afterward."
+            ),
+        },
+        untrusted_context_message("skill under test", md),
+        {"role": "user", "content": task},
+    ]
 
 
 async def _eval_skill_run(skill_md: str, task: str, transcript: str,
@@ -429,14 +447,7 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
             log.append({"type": "say", "text": "".join(say_buf)})
             say_buf.clear()
 
-    messages = [
-        {"role": "system", "content":
-            "You are TESTING a skill. Below is a reusable skill (a procedure). Follow it "
-            "to complete the user's task for real, using your available tools, step by "
-            "step. If the skill is wrong, unclear, or references tools that don't exist, "
-            "do your best — the problems will be reviewed afterward.\n\n=== SKILL ===\n" + md},
-        {"role": "user", "content": task},
-    ]
+    messages = _skill_test_messages(md, task)
     try:
         async for chunk in stream_agent_loop(
             url, model, messages, headers=headers,
@@ -694,12 +705,7 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
     import json as _json
     from src.agent_loop import stream_agent_loop
     transcript = []
-    messages = [
-        {"role": "system", "content":
-            "You are TESTING a skill. Follow this skill's procedure to complete the task "
-            "for real, using your tools, step by step.\n\n=== SKILL ===\n" + md},
-        {"role": "user", "content": task},
-    ]
+    messages = _skill_test_messages(md, task)
     try:
         # max_tokens explicitly set: passing 0 lets some upstreams (Ollama,
         # OpenAI-compat) generate an empty completion, which manifested as

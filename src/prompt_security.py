@@ -66,6 +66,7 @@ def untrusted_context_message(
     content: Any,
     *,
     provenance_origin: str | None = None,
+    arm_tool_gate: bool = True,
 ) -> Dict[str, Any]:
     """Return an LLM message that keeps retrieved/source text out of system role.
 
@@ -78,7 +79,11 @@ def untrusted_context_message(
     safe_label = _sanitize_label(label)
     text = "" if content is None else str(content)
     text = _escape_guard_markers(text)
-    metadata: Dict[str, Any] = {"trusted": False, "source": label}
+    metadata: Dict[str, Any] = {
+        "trusted": False,
+        "source": label,
+        "tool_gate_untrusted": bool(arm_tool_gate),
+    }
     if provenance_origin:
         metadata["provenance_origin"] = provenance_origin
     return {

@@ -32,6 +32,18 @@ from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
 
+
+class _MissingToolSecurityContext:
+    pass
+
+
+class _NoToolSecurityContext:
+    """Explicit sentinel for non-agent callers that have no run provenance."""
+
+
+_MISSING_TOOL_SECURITY_CONTEXT = _MissingToolSecurityContext()
+NO_TOOL_SECURITY_CONTEXT = _NoToolSecurityContext()
+
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
 # (/app/data) and the local data directory for manual installs.
@@ -576,7 +588,11 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
-    security_context: Optional[ToolRunSecurityContext] = None,
+    security_context: (
+        ToolRunSecurityContext
+        | _NoToolSecurityContext
+        | _MissingToolSecurityContext
+    ) = _MISSING_TOOL_SECURITY_CONTEXT,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -584,7 +600,21 @@ async def execute_tool_block(
     cwd confine to it) for the duration of this call, then delegate. Reset on the
     way out so the binding never leaks to the next tool call.
     """
-    if security_context is not None:
+    if security_context is _MISSING_TOOL_SECURITY_CONTEXT:
+        raise TypeError(
+            "execute_tool_block requires security_context; pass a "
+            "ToolRunSecurityContext or NO_TOOL_SECURITY_CONTEXT explicitly"
+        )
+    if (
+        not isinstance(security_context, ToolRunSecurityContext)
+        and security_context is not NO_TOOL_SECURITY_CONTEXT
+    ):
+        raise TypeError(
+            "security_context must be a ToolRunSecurityContext or "
+            "NO_TOOL_SECURITY_CONTEXT"
+        )
+
+    if isinstance(security_context, ToolRunSecurityContext):
         decision = security_context.decision_for(getattr(block, "tool_type", None))
         if not decision.allowed:
             logger.warning(
@@ -606,7 +636,7 @@ async def execute_tool_block(
             progress_cb=progress_cb,
             tool_policy=tool_policy,
         )
-        if security_context is not None:
+        if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
                 getattr(block, "tool_type", None),
                 output[1],

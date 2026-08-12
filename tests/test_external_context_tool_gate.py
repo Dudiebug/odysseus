@@ -8,6 +8,7 @@ import pytest
 
 from src.tool_capabilities import (
     KNOWN_CAPABILITY_TOOLS,
+    ResultIntegrity,
     ToolEffect,
     ToolRunSecurityContext,
     capabilities_for_tool,
@@ -94,6 +95,26 @@ def test_external_web_result_blocks_later_code_execution():
     assert context.external_untrusted_context_seen is True
     assert decision.allowed is False
     assert "execute_code" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["read_file", "grep", "bash", "python", "manage_bg_jobs"],
+)
+def test_workspace_and_process_results_taint_run(tool_name):
+    context = ToolRunSecurityContext()
+
+    context.observe_tool_result(
+        tool_name,
+        {"output": "untrusted content", "exit_code": 0},
+    )
+
+    assert (
+        capabilities_for_tool(tool_name).result_integrity
+        is ResultIntegrity.WORKSPACE_UNTRUSTED
+    )
+    assert context.external_untrusted_context_seen is True
+    assert context.decision_for("write_file").allowed is False
 
 
 def test_failed_web_result_does_not_taint_run():
@@ -184,6 +205,67 @@ def test_web_page_message_initializes_taint_with_structured_provenance():
     assert messages_contain_external_untrusted_context([message]) is True
 
 
+def test_untrusted_context_message_arms_gate_by_default_and_can_opt_out():
+    from src.prompt_security import untrusted_context_message
+
+    armed = untrusted_context_message("MCP tools", "attacker-controlled description")
+    opted_out = untrusted_context_message(
+        "server status",
+        "known-safe",
+        arm_tool_gate=False,
+    )
+
+    assert armed["metadata"]["tool_gate_untrusted"] is True
+    assert messages_contain_external_untrusted_context([armed]) is True
+    assert opted_out["metadata"]["tool_gate_untrusted"] is False
+    assert messages_contain_external_untrusted_context([opted_out]) is False
+
+
+def test_security_context_can_rescan_late_prompt_messages():
+    from src.prompt_security import untrusted_context_message
+
+    context = ToolRunSecurityContext()
+    context.observe_messages([untrusted_context_message("webpage", "injected")])
+
+    assert context.external_untrusted_context_seen is True
+    assert context.decision_for("bash").allowed is False
+
+
+def test_native_untrusted_tool_result_keeps_cross_turn_provenance():
+    from src.agent_loop import _append_tool_results
+
+    messages = []
+    _append_tool_results(
+        messages,
+        "",
+        [{"id": "call_1", "name": "web_search", "arguments": "{}"}],
+        ["web_search: result"],
+        ["attacker-controlled result"],
+        True,
+        1,
+    )
+
+    tool_message = messages[-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["metadata"]["tool_gate_untrusted"] is True
+    assert messages_contain_external_untrusted_context(messages) is True
+
+
+def test_minimal_document_prompt_preserves_untrusted_metadata():
+    from types import SimpleNamespace
+
+    from src.agent_loop import _minimal_odysseus_doc_messages
+
+    messages = _minimal_odysseus_doc_messages(
+        [{"role": "user", "content": "edit this"}],
+        SimpleNamespace(title="Doc", language="markdown", current_content="injected"),
+    )
+
+    active_document = messages[-2]
+    assert active_document["metadata"]["tool_gate_untrusted"] is True
+    assert messages_contain_external_untrusted_context(messages) is True
+
+
 def test_legacy_web_page_message_initializes_taint_from_source_label():
     messages = [
         {
@@ -212,6 +294,14 @@ async def test_dispatcher_backstop_blocks_without_entering_tool_implementation()
     assert desc == "bash: BLOCKED"
     assert result["blocked"] is True
     assert result["policy"] == "external_untrusted_context"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_requires_explicit_security_context():
+    from src.tool_execution import execute_tool_block
+
+    with pytest.raises(TypeError, match="requires security_context"):
+        await execute_tool_block(ToolBlock("ask_user", "question"))
 
 
 @pytest.mark.asyncio

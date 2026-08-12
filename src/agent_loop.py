@@ -34,8 +34,10 @@ from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_capabilities import (
+    ResultIntegrity,
     ToolRunSecurityContext,
     blocked_tool_result,
+    capabilities_for_tool,
     messages_contain_external_untrusted_context,
 )
 from src.tool_utils import _truncate, get_mcp_manager
@@ -1583,16 +1585,16 @@ def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
     if not facts:
         return None
     logger.info("[agent-intent] odysseus doc minimal memory facts=%s", len(facts))
-    return {
-        "role": "user",
-        "content": (
+    return untrusted_context_message(
+        "saved memory: minimal context",
+        (
             "Saved user memory facts from Odysseus Brain. These are the same "
             "user facts available in the normal prompt path. Use them when "
             "the user asks for personalization, identity, background, "
             "preferences, or anything about \"me\" or \"my\":\n"
             + "\n".join(f"- {fact}" for fact in facts)
         ),
-    }
+    )
 
 
 def _resolved_tool_event_name(event: dict[str, Any]) -> str:
@@ -1690,9 +1692,9 @@ def _minimal_recent_notes_tool_context_message(messages: List[Dict]) -> Optional
     recent_text = ""
     if recent_turns:
         recent_text = "Recent chat turns for pronoun/reference resolution:\n" + "\n".join(recent_turns) + "\n\n"
-    return {
-        "role": "user",
-        "content": (
+    return untrusted_context_message(
+        "recent tool context",
+        (
             "Recent Odysseus tool context for follow-up references only. "
             "Use concrete note ids, calendar event uids, and email UIDs from "
             "here when the user says that note/event/reminder/appointment/"
@@ -1700,7 +1702,7 @@ def _minimal_recent_notes_tool_context_message(messages: List[Dict]) -> Optional
             + recent_text
             + "\n\n".join(parts)
         ),
-    }
+    )
 
 
 def _compact_email_draft_context(raw: str, *, max_own_chars: int = 1200, max_history_chars: int = 1200) -> str:
@@ -1810,17 +1812,18 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
         else:
             content_for_prompt = content
             content_note = "Content:\n"
-        out.append({
-            "role": "user",
-            "content": (
+        active_document_message = untrusted_context_message(
+            "active editor document",
+            (
                 "Active document:\n"
                 f"Title: {active_document.title}\n"
                 f"Language: {active_document.language or 'text'}\n"
                 f"{content_note}"
                 f"{content_for_prompt}"
             ),
-            "_agent_injected": "context",
-        })
+        )
+        active_document_message["_agent_injected"] = "context"
+        out.append(active_document_message)
     out.append({"role": "user", "content": latest})
     return out
 
@@ -2983,11 +2986,19 @@ def _append_tool_results(
         messages.append(assistant_msg)
         for j, tc in enumerate(native_tool_calls):
             result_text = tool_result_texts[j] if j < len(tool_result_texts) else ""
-            messages.append({
+            result_message = {
                 "role": "tool",
                 "tool_call_id": tc.get("id", f"call_{round_num}_{j}"),
                 "content": result_text,
-            })
+            }
+            capabilities = capabilities_for_tool(tc.get("name", ""))
+            if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
+                result_message["metadata"] = {
+                    "trusted": False,
+                    "source": f"tool result: {tc.get('name', '')}",
+                    "tool_gate_untrusted": True,
+                }
+            messages.append(result_message)
     else:
         tool_output_text = "\n\n".join(tool_results)
         msg = {"role": "assistant", "content": round_response}
@@ -4260,6 +4271,7 @@ async def stream_agent_loop(
     )
     prep_timings["context_trim"] = time.time() - _t3
 
+    run_security.observe_messages(_initial_route_request_messages)
     agent_prompt_tokens = estimate_tokens(_initial_route_request_messages)
     logger.info(
         "[agent-timing] prep_done model=%s prompt_tokens=%s context_length=%s prep=%s",
@@ -4493,6 +4505,7 @@ async def stream_agent_loop(
                 context_length,
             )
             _last_route_context_length = state["context_length"]
+            run_security.observe_messages(request_messages)
             candidate_tools = _tool_schemas_for_route(state)
             state["tools"] = candidate_tools
             _candidate_request_states[index] = state

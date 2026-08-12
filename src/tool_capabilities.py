@@ -112,6 +112,7 @@ _register(
 _register(
     {"bash", "manage_bg_jobs", "python"},
     ToolEffect.EXECUTE_CODE,
+    result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
 )
 _register(
     {"apply_patch", "edit_file", "write_file"},
@@ -291,6 +292,8 @@ def messages_contain_external_untrusted_context(messages: Iterable[dict]) -> boo
         metadata = message.get("metadata")
         if not isinstance(metadata, dict) or metadata.get("trusted") is not False:
             continue
+        if metadata.get("tool_gate_untrusted") is True:
+            return True
         if metadata.get("provenance_origin") == "external":
             return True
         source = metadata.get("source")
@@ -310,6 +313,11 @@ class ToolRunSecurityContext:
 
     external_untrusted_context_seen: bool = False
     external_sources: list[str] = field(default_factory=list)
+
+    def observe_messages(self, messages: Iterable[dict]) -> None:
+        """Promote any server-labelled untrusted prompt context into the gate."""
+        if messages_contain_external_untrusted_context(messages):
+            self.external_untrusted_context_seen = True
 
     def decision_for(self, tool_name: Any) -> ToolGateDecision:
         if not self.external_untrusted_context_seen:
@@ -336,7 +344,7 @@ class ToolRunSecurityContext:
         if result.get("blocked") or result.get("error") or result.get("exit_code") not in (None, 0):
             return
         capabilities = capabilities_for_tool(tool_name)
-        if capabilities.result_integrity is ResultIntegrity.EXTERNAL_UNTRUSTED:
+        if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
             self.external_untrusted_context_seen = True
             if isinstance(tool_name, str) and tool_name not in self.external_sources:
                 self.external_sources.append(tool_name)

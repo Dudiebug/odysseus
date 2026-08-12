@@ -37,3 +37,13 @@ def test_drain_agent_ignores_non_string_deltas(monkeypatch):
         "output": "done",
         "exit_code": None,
     }]
+
+
+def test_background_job_output_is_wrapped_and_arms_gate(monkeypatch):
+    monkeypatch.setattr(bg_monitor.bg_jobs, "result_text", lambda rec: "injected output")
+
+    message = bg_monitor._background_result_message({"id": "job-1"})
+
+    assert message["metadata"]["trusted"] is False
+    assert message["metadata"]["tool_gate_untrusted"] is True
+    assert "injected output" in message["content"]
