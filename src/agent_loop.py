@@ -3060,15 +3060,19 @@ def _append_tool_results(
                 "content": result_text,
             }
             capabilities = capabilities_for_action(tool_name, tool_content)
-            if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
+            should_arm_gate = tool_result_should_arm_gate(
+                tool_name,
+                result,
+                tool_content,
+            )
+            if (
+                capabilities.result_integrity is not ResultIntegrity.SYSTEM
+                or should_arm_gate
+            ):
                 result_message["metadata"] = {
                     "trusted": False,
                     "source": f"tool result: {tool_name}",
-                    "tool_gate_untrusted": tool_result_should_arm_gate(
-                        tool_name,
-                        result,
-                        tool_content,
-                    ),
+                    "tool_gate_untrusted": should_arm_gate,
                 }
             messages.append(result_message)
     else:

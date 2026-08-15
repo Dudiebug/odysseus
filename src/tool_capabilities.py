@@ -133,14 +133,13 @@ _register(
 _register(
     {"apply_patch", "edit_file", "write_file"},
     ToolEffect.WRITE_WORKSPACE,
+    # Successful writes include unified diffs that can echo arbitrary existing
+    # workspace content back into the next model round.
+    result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
 )
 _register(
     {
-        "ai_draft_email_reply",
         "create_document",
-        "create_session",
-        "draft_email",
-        "draft_email_reply",
         "manage_calendar",
         "manage_contact",
         "manage_documents",
@@ -154,6 +153,18 @@ _register(
         "todowrite",
     },
     ToolEffect.WRITE_PRIVATE,
+)
+_register(
+    {
+        "ai_draft_email_reply",
+        "create_session",
+        "draft_email",
+        "draft_email_reply",
+    },
+    ToolEffect.WRITE_PRIVATE,
+    # These tools resolve user-configured endpoints/accounts or read stored
+    # email content before returning model-visible status text.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"edit_document", "update_document"},
@@ -201,15 +212,21 @@ _register(
         "unsubscribe_email",
     },
     ToolEffect.EXTERNAL_SIDE_EFFECT,
+    # Email action results can include stored headers/account labels or remote
+    # SMTP/IMAP responses, even when the action itself succeeded.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"delete_email"},
     ToolEffect.EXTERNAL_SIDE_EFFECT,
     ToolEffect.DESTRUCTIVE,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"ui_control"},
     ToolEffect.UI_SIDE_EFFECT,
+    # Model switches and custom-theme validation read mutable user settings.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {
@@ -222,6 +239,9 @@ _register(
         "vault_unlock",
     },
     ToolEffect.ADMIN_CHANGE,
+    # Cookbook/process operations can return stored presets, provider data,
+    # remote shell output, and command errors.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {
@@ -499,12 +519,17 @@ def tool_result_should_arm_gate(
         return False
     if result.get("blocked") or result.get("approval_required"):
         return False
+    # A producer that knows a particular response body came from a remote or
+    # stored source overrides a coarse static SYSTEM default.
+    if result.get("untrusted_content") is True:
+        return True
     capabilities = capabilities_for_action(tool_name, content)
     if capabilities.result_integrity is ResultIntegrity.SYSTEM:
         return False
-    if tool_result_is_successful(result) or result.get("untrusted_content") is True:
+    if tool_result_is_successful(result):
         return True
     model_visible_keys = (
+        "error",
         "stderr",
         "stdout",
         "output",
@@ -618,11 +643,9 @@ class ToolRunSecurityContext:
     ) -> None:
         if not tool_result_should_arm_gate(tool_name, result, content):
             return
-        capabilities = capabilities_for_action(tool_name, content)
-        if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
-            self.external_untrusted_context_seen = True
-            if isinstance(tool_name, str) and tool_name not in self.external_sources:
-                self.external_sources.append(tool_name)
+        self.external_untrusted_context_seen = True
+        if isinstance(tool_name, str) and tool_name not in self.external_sources:
+            self.external_sources.append(tool_name)
 
 
 def blocked_tool_result(tool_name: Any, reason: str) -> tuple[str, dict]:
