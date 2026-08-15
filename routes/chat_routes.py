@@ -916,6 +916,7 @@ def setup_chat_routes(
         )
         exact_tool_approval = None
         pending_tool_approval = None
+        retired_tool_approval_taint = False
         tool_approval_continuation = False
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
@@ -1122,6 +1123,15 @@ def setup_chat_routes(
                         f"Denied the {pending_tool_approval.tool_name} action shown above."
                     )
                 chat_mode = "agent"
+            else:
+                # A normal user message supersedes the card that was waiting
+                # in this thread. Retire its opaque grant, but preserve the
+                # originating provenance for this turn so dismissing a card
+                # cannot make the same model-requested action authoritative.
+                retired_tool_approval_taint = tool_approval_store.retire_for_session(
+                    owner=owner,
+                    session_id=session,
+                )
             _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
@@ -2217,9 +2227,12 @@ def setup_chat_routes(
                         uploaded_files=ctx.uploaded_files,
                         defer_context_shaping=_foreground_policy.enabled,
                         external_untrusted_context_seen=bool(
-                            tool_approval_continuation
-                            and pending_tool_approval
-                            and pending_tool_approval.external_untrusted_context_seen
+                            retired_tool_approval_taint
+                            or (
+                                tool_approval_continuation
+                                and pending_tool_approval
+                                and pending_tool_approval.external_untrusted_context_seen
+                            )
                         ),
                         exact_approval=exact_tool_approval,
                     ):

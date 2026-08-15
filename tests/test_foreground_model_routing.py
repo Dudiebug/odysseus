@@ -377,6 +377,34 @@ async def test_chat_stream_denial_keeps_originating_run_tainted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_normal_reply_retires_pending_action_but_keeps_taint(
+    monkeypatch,
+):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice",
+        session_id="session-1",
+        origin_run_id="run-1",
+        tool_name="bash",
+        content="printf retry",
+        workspace=None,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("bash", "printf retry"),
+    )
+
+    response = await endpoint(_RouteRequest("agent"))
+    async for _ in response.body_iterator:
+        pass
+
+    assert "exact_approval" not in captured
+    assert captured["agent_external_untrusted_context_seen"] is True
+    assert chat_routes.tool_approval_store.peek(pending.approval_id) is None
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_approval_ignores_research_and_new_attachments(monkeypatch):
     from src.tool_capabilities import capabilities_for_action
 

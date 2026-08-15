@@ -358,5 +358,35 @@ class ToolApprovalStore:
             self._purge_expired_locked(now)
             return self._pending.get(str(approval_id or ""))
 
+    def retire_for_session(self, *, owner: Any, session_id: Any) -> bool:
+        """Discard pending actions superseded by an ordinary user turn.
+
+        Returns whether any retired action carried external provenance, so the
+        caller can preserve that security state without treating the new user
+        message as an approval continuation.
+        """
+        now = time.time()
+        normalized_owner = _normalized_owner(owner)
+        normalized_session = str(session_id or "")
+        if not normalized_session:
+            return False
+        with self._lock:
+            self._purge_expired_locked(now)
+            retired_ids = [
+                approval_id
+                for approval_id, pending in self._pending.items()
+                if (
+                    pending.owner == normalized_owner
+                    and pending.session_id == normalized_session
+                )
+            ]
+            carried_taint = any(
+                self._pending[approval_id].external_untrusted_context_seen
+                for approval_id in retired_ids
+            )
+            for approval_id in retired_ids:
+                self._pending.pop(approval_id, None)
+        return carried_taint
+
 
 tool_approval_store = ToolApprovalStore()

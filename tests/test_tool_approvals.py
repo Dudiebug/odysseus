@@ -105,6 +105,17 @@ def test_new_session_approval_supersedes_prior_pending_action():
     assert store.peek(second.approval_id) == second
 
 
+def test_ordinary_session_turn_retires_pending_action_and_preserves_taint():
+    store = ToolApprovalStore()
+    pending = _pending(store, owner="Alice", session_id="session-1")
+
+    assert store.retire_for_session(owner="bob", session_id="session-1") is False
+    assert store.peek(pending.approval_id) == pending
+    assert store.retire_for_session(owner="alice", session_id="session-1") is True
+    assert store.peek(pending.approval_id) is None
+    assert store.retire_for_session(owner="alice", session_id=None) is False
+
+
 def test_independent_headless_runs_do_not_supersede_each_other():
     store = ToolApprovalStore()
     first = _pending(store, session_id=None, origin_run_id="headless-1")
