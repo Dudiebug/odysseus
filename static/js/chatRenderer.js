@@ -1367,7 +1367,7 @@ document.addEventListener('click', function(e) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js?v=20260722emailfastindex1').then(mod => {
+    import('./document.js?v=20260815approvalsave1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1389,7 +1389,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
+    import('./emailLibrary.js?v=20260815approvalsave1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -2342,6 +2342,7 @@ export function renderAskUserCard(payload, options) {
   card.setAttribute('role', 'group');
   card.tabIndex = -1;
   const multi = !!aq.multi;
+  const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
   const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
 
   const head = document.createElement('div');
@@ -2365,6 +2366,27 @@ export function renderAskUserCard(payload, options) {
   question.innerHTML = emojiText(aq.question);
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
+
+  if (isToolApproval && aq.action) {
+    const action = document.createElement('div');
+    action.className = 'ask-user-option-desc';
+    const effects = Array.isArray(aq.action.effects)
+      ? aq.action.effects.join(', ')
+      : '';
+    action.textContent = [
+      aq.action.tool || 'tool',
+      aq.action.content || '',
+      effects ? `Effects: ${effects}` : '',
+      aq.action.workspace ? `Workspace: ${aq.action.workspace}` : '',
+      aq.action.document_id ? `Document: ${aq.action.document_id}` : '',
+      aq.action.document_version != null
+        ? `Document version: ${aq.action.document_version}`
+        : '',
+      aq.action.digest ? `Approval fingerprint: ${aq.action.digest}` : '',
+    ].filter(Boolean).join('\n');
+    action.style.whiteSpace = 'pre-wrap';
+    card.appendChild(action);
+  }
 
   const list = document.createElement('div');
   list.className = 'ask-user-options';
@@ -2403,7 +2425,23 @@ export function renderAskUserCard(payload, options) {
     }
     if (!multi) {
       row.type = 'button';
-      row.addEventListener('click', () => send(label));
+      row.addEventListener('click', () => {
+        if (isToolApproval) {
+          card.remove();
+          document.dispatchEvent(new CustomEvent('odysseus:tool-approval', {
+            detail: {
+              approval_id: aq.approval_id,
+              decision: String((opt && opt.value) || '').toLowerCase(),
+              label,
+              document_id: aq.action && aq.action.document_id
+                ? String(aq.action.document_id)
+                : '',
+            },
+          }));
+        } else {
+          send(label);
+        }
+      });
     }
     list.appendChild(row);
   });
@@ -2439,7 +2477,7 @@ export function renderAskUserCard(payload, options) {
   });
   other.appendChild(otherInput);
   other.appendChild(otherSend);
-  card.appendChild(other);
+  if (!isToolApproval) card.appendChild(other);
 
   chatBox.appendChild(card);
   if (renderOptions.scroll !== false) {
@@ -2489,7 +2527,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
-        const r = ev.round || 1;
+        const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
       }
@@ -2497,9 +2535,12 @@ export function addMessage(role, content, modelName, metadata) {
       const toolRounds = Object.keys(toolsByRound).map(Number);
       const maxRound = Math.max(toolRounds.length ? Math.max(...toolRounds) : 0, roundTexts.length);
 
-      for (let r = 0; r < maxRound; r++) {
-        const roundNum = r + 1;
-        const txt = resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata);
+      const firstRound = (toolsByRound[0] || []).length ? 0 : 1;
+      for (let roundNum = firstRound; roundNum <= maxRound; roundNum++) {
+        const r = roundNum - 1;
+        const txt = r >= 0
+          ? resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata)
+          : '';
 
         if (txt) {
           const wrap = document.createElement('div');
