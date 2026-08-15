@@ -7,6 +7,7 @@ run-local integrity gates before dispatch.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -88,8 +89,14 @@ _register(
     result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
 )
 _register(
-    {"web_fetch", "web_search"},
+    {"web_search"},
     ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"web_fetch"},
+    ToolEffect.BROKERED_NETWORK_READ,
+    ToolEffect.NETWORK_EGRESS,
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
@@ -135,13 +142,22 @@ _register(
         "manage_session",
         "manage_skills",
         "manage_tasks",
-        "pipeline",
-        "send_to_session",
         "suggest_document",
         "todowrite",
         "update_document",
     },
     ToolEffect.WRITE_PRIVATE,
+)
+_register(
+    {"pipeline"},
+    ToolEffect.NETWORK_EGRESS,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"send_to_session"},
+    ToolEffect.NETWORK_EGRESS,
+    ToolEffect.WRITE_PRIVATE,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"chat_with_model", "ask_teacher"},
@@ -251,6 +267,165 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
     return _UNKNOWN_CAPABILITIES
 
 
+_PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "manage_calendar": frozenset({"list_calendars", "list_events"}),
+        "manage_contact": frozenset({"list"}),
+        "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
+        "manage_memory": frozenset({"list", "search"}),
+        "manage_notes": frozenset({"list", "search", "find", "view"}),
+        "manage_research": frozenset({"list", "read", "open", "view", "get"}),
+        "manage_session": frozenset({"list", "switch", "open", "select", "view"}),
+        "manage_skills": frozenset({"list", "index", "view", "view_ref", "search"}),
+        "manage_tasks": frozenset({"list"}),
+    }
+)
+
+_PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "manage_calendar": frozenset(
+            {"create_event", "update_event", "delete_event"}
+        ),
+        "manage_contact": frozenset({"add", "update", "edit", "delete"}),
+        "manage_documents": frozenset({"delete", "tidy"}),
+        "manage_memory": frozenset({"add", "edit", "delete"}),
+        "manage_notes": frozenset({"add", "update", "delete", "toggle_item"}),
+        "manage_research": frozenset({"delete"}),
+        "manage_session": frozenset(
+            {
+                "rename",
+                "archive",
+                "unarchive",
+                "delete",
+                "important",
+                "unimportant",
+                "truncate",
+                "fork",
+            }
+        ),
+        "manage_skills": frozenset({"add", "edit", "patch", "publish", "delete"}),
+        "manage_tasks": frozenset({"create", "edit", "delete", "pause", "resume", "run"}),
+    }
+)
+
+_ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
+    {
+        "manage_calendar": "list_events",
+        "manage_documents": "list",
+        "manage_research": "list",
+        "manage_tasks": "list",
+    }
+)
+
+_ACTION_ALIASES: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "manage_calendar": MappingProxyType(
+            {
+                "create": "create_event",
+                "update": "update_event",
+                "delete": "delete_event",
+                "list": "list_events",
+            }
+        ),
+        "manage_notes": MappingProxyType(
+            {
+                "create": "add",
+                "new": "add",
+                "save": "add",
+                "remind": "add",
+                "reminder": "add",
+                "remove": "delete",
+                "remove_item": "toggle_item",
+            }
+        ),
+    }
+)
+
+_LINE_ACTION_TOOLS = frozenset({"manage_memory", "manage_session"})
+
+
+def _action_from_content(tool_name: str, content: Any) -> str | None:
+    """Extract the action discriminator using the same accepted input shapes."""
+    if isinstance(content, Mapping):
+        payload: Any = dict(content)
+    elif isinstance(content, str):
+        raw = content.strip()
+        if tool_name in _LINE_ACTION_TOOLS and raw and not raw.startswith("{"):
+            return raw.splitlines()[0].strip().replace("-", "_").casefold() or None
+        try:
+            payload = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            return None
+    else:
+        payload = {}
+
+    if not isinstance(payload, dict):
+        return None
+    if (
+        len(payload) == 1
+        and isinstance(payload.get("body"), dict)
+        and "action" in payload["body"]
+    ):
+        payload = payload["body"]
+
+    action = payload.get("action")
+    if (
+        not action
+        and tool_name == "manage_calendar"
+        and isinstance(payload.get("events"), list)
+    ):
+        action = "create_event"
+    if not action and tool_name == "manage_tasks" and any(
+        payload.get(key) is not None
+        for key in ("task", "description", "schedule", "time", "day_of_week")
+    ):
+        action = "create"
+    if not isinstance(action, str) or not action.strip():
+        action = _ACTION_DEFAULTS.get(tool_name)
+    if not action:
+        return None
+    normalized = action.strip().replace("-", "_").casefold()
+    return _ACTION_ALIASES.get(tool_name, {}).get(normalized, normalized)
+
+
+def capabilities_for_action(tool_name: Any, content: Any) -> ToolCapabilities:
+    """Classify a sealed multiplexed action; ambiguous actions fail high."""
+    base = capabilities_for_tool(tool_name)
+    if not isinstance(tool_name, str) or tool_name not in _PRIVATE_ACTION_READS:
+        return base
+
+    action = _action_from_content(tool_name, content)
+    if action in _PRIVATE_ACTION_READS[tool_name]:
+        return _capabilities(
+            ToolEffect.READ_PRIVATE,
+            result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+        )
+    if action in _PRIVATE_ACTION_WRITES[tool_name]:
+        return ToolCapabilities(
+            base.effects,
+            ResultIntegrity.EXTERNAL_UNTRUSTED,
+            known=base.known,
+        )
+
+    return _capabilities(
+        ToolEffect.READ_PRIVATE,
+        ToolEffect.WRITE_PRIVATE,
+        result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+    )
+
+
+def tool_result_is_successful(result: Any) -> bool:
+    """Return whether a result actually introduced successful tool output."""
+    return bool(
+        isinstance(result, dict)
+        and not result.get("blocked")
+        and not result.get("approval_required")
+        and not result.get("error")
+        and result.get("exit_code") in (None, 0)
+        and result.get("success") is not False
+    )
+
+
 POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
     {
         ToolEffect.READ_PRIVATE,
@@ -292,8 +467,14 @@ def messages_contain_external_untrusted_context(messages: Iterable[dict]) -> boo
         metadata = message.get("metadata")
         if not isinstance(metadata, dict) or metadata.get("trusted") is not False:
             continue
-        if metadata.get("tool_gate_untrusted") is True:
+        gate_marker = metadata.get("tool_gate_untrusted")
+        if gate_marker is True:
             return True
+        if gate_marker is False:
+            # Explicit current-format opt-outs are authoritative.  The source
+            # label heuristics below exist only for older saved wrappers that
+            # predate the marker.
+            continue
         if metadata.get("provenance_origin") == "external":
             return True
         source = metadata.get("source")
@@ -319,10 +500,10 @@ class ToolRunSecurityContext:
         if messages_contain_external_untrusted_context(messages):
             self.external_untrusted_context_seen = True
 
-    def decision_for(self, tool_name: Any) -> ToolGateDecision:
+    def decision_for(self, tool_name: Any, content: Any = None) -> ToolGateDecision:
         if not self.external_untrusted_context_seen:
             return ToolGateDecision(True)
-        capabilities = capabilities_for_tool(tool_name)
+        capabilities = capabilities_for_action(tool_name, content)
         blocked_effects = capabilities.effects & POST_EXTERNAL_BLOCKED_EFFECTS
         if capabilities.known and not blocked_effects:
             return ToolGateDecision(True)
@@ -338,12 +519,15 @@ class ToolRunSecurityContext:
             ),
         )
 
-    def observe_tool_result(self, tool_name: Any, result: Any) -> None:
-        if not isinstance(result, dict):
+    def observe_tool_result(
+        self,
+        tool_name: Any,
+        result: Any,
+        content: Any = None,
+    ) -> None:
+        if not tool_result_is_successful(result):
             return
-        if result.get("blocked") or result.get("error") or result.get("exit_code") not in (None, 0):
-            return
-        capabilities = capabilities_for_tool(tool_name)
+        capabilities = capabilities_for_action(tool_name, content)
         if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
             self.external_untrusted_context_seen = True
             if isinstance(tool_name, str) and tool_name not in self.external_sources:

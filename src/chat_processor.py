@@ -325,6 +325,7 @@ class ChatProcessor:
                         "Pinned memory context. Some pinned memories are only "
                         f"included when relevant:\n- {pinned_text}"
                     ),
+                    arm_tool_gate=False,
                 ))
                 for m in selected_pinned:
                     self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
@@ -342,6 +343,7 @@ class ChatProcessor:
                             "Memory context. Do not reference unless the user asks "
                             f"about these topics.\n{ext_text}"
                         ),
+                        arm_tool_gate=False,
                     ))
                     for m in relevant:
                         self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "recalled"})
@@ -381,7 +383,11 @@ class ChatProcessor:
                         )
                         if len(rag_content) > 10000:
                             rag_content = rag_content[:10000] + "\n[Truncated]"
-                        preface.append(untrusted_context_message("retrieved documents", rag_content))
+                        preface.append(untrusted_context_message(
+                            "retrieved documents",
+                            rag_content,
+                            arm_tool_gate=False,
+                        ))
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")
 
@@ -489,6 +495,10 @@ class ChatProcessor:
                     for s in sorted(by_cat[cat], key=lambda x: x["name"]):
                         desc = s.get("description") or ""
                         lines.append(f"    - {s['name']}: {desc}" if desc else f"    - {s['name']}")
-                preface.append(untrusted_context_message("available skills index", "\n".join(lines)))
+                preface.append(untrusted_context_message(
+                    "available skills index",
+                    "\n".join(lines),
+                    arm_tool_gate=False,
+                ))
 
         return preface, rag_sources, web_sources

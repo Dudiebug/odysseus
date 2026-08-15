@@ -120,7 +120,7 @@ def _skill_test_messages(md: str, task: str) -> list[dict]:
                 "do not exist, do your best; the problems will be reviewed afterward."
             ),
         },
-        untrusted_context_message("skill under test", md),
+        untrusted_context_message("skill under test", md, arm_tool_gate=False),
         {"role": "user", "content": task},
     ]
 

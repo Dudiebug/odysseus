@@ -615,7 +615,10 @@ async def execute_tool_block(
         )
 
     if isinstance(security_context, ToolRunSecurityContext):
-        decision = security_context.decision_for(getattr(block, "tool_type", None))
+        decision = security_context.decision_for(
+            getattr(block, "tool_type", None),
+            getattr(block, "content", None),
+        )
         if not decision.allowed:
             logger.warning(
                 "External-context policy blocked tool=%r",
@@ -640,6 +643,7 @@ async def execute_tool_block(
             security_context.observe_tool_result(
                 getattr(block, "tool_type", None),
                 output[1],
+                getattr(block, "content", None),
             )
         return output
     finally:

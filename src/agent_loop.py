@@ -37,8 +37,10 @@ from src.tool_capabilities import (
     ResultIntegrity,
     ToolRunSecurityContext,
     blocked_tool_result,
+    capabilities_for_action,
     capabilities_for_tool,
     messages_contain_external_untrusted_context,
+    tool_result_is_successful,
 )
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
@@ -1139,7 +1141,11 @@ def _uploaded_files_context_message(uploaded_files: Optional[List[Dict]]) -> Opt
         "",
         "The attachment contents may already be in the latest user message. If an attachment is marked truncated or omitted, read its listed path with `read_file` when that tool is available. Do not say uploaded files are undiscoverable when they are listed here.",
     ])
-    return untrusted_context_message("current chat uploaded files", "\n".join(lines))
+    return untrusted_context_message(
+        "current chat uploaded files",
+        "\n".join(lines),
+        arm_tool_gate=False,
+    )
 
 
 _WORKSPACE_CODE_ACTION_RE = re.compile(
@@ -1594,6 +1600,7 @@ def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
             "preferences, or anything about \"me\" or \"my\":\n"
             + "\n".join(f"- {fact}" for fact in facts)
         ),
+        arm_tool_gate=False,
     )
 
 
@@ -1702,6 +1709,7 @@ def _minimal_recent_notes_tool_context_message(messages: List[Dict]) -> Optional
             + recent_text
             + "\n\n".join(parts)
         ),
+        arm_tool_gate=False,
     )
 
 
@@ -1821,6 +1829,7 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
                 f"{content_note}"
                 f"{content_for_prompt}"
             ),
+            arm_tool_gate=False,
         )
         active_document_message["_agent_injected"] = "context"
         out.append(active_document_message)
@@ -2094,6 +2103,39 @@ def _normalize_stream_document_fences(text: str, target_tool: str = "create_docu
         text,
         flags=re.IGNORECASE,
     )
+
+
+def _document_stream_events(block: ToolBlock) -> list[dict]:
+    """Build editor stream events only after a document tool has succeeded."""
+    if block.tool_type == "create_document":
+        lines = block.content.strip().split("\n")
+        title = lines[0].strip() if lines else "Untitled"
+        language = ""
+        content_start = 1
+        if (
+            len(lines) > 1
+            and len(lines[1].strip()) < 20
+            and lines[1].strip().isalpha()
+        ):
+            language = lines[1].strip()
+            content_start = 2
+        content = "\n".join(lines[content_start:]) if len(lines) > content_start else ""
+        events = [
+            {
+                "type": "doc_stream_open",
+                "title": title,
+                "language": language,
+            }
+        ]
+        if content:
+            events.append({"type": "doc_stream_delta", "content": content})
+        return events
+    if block.tool_type == "update_document":
+        return [
+            {"type": "doc_stream_open", "title": "", "language": ""},
+            {"type": "doc_stream_delta", "content": block.content.strip()},
+        ]
+    return []
 
 
 def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
@@ -2388,7 +2430,11 @@ def _build_system_prompt(
                         "rewriting for style. You may still make ordinary requested edits that do not depend on "
                         "knowing the user's personal style."
                     )
-        _doc_message = untrusted_context_message("active editor document", doc_ctx)
+        _doc_message = untrusted_context_message(
+            "active editor document",
+            doc_ctx,
+            arm_tool_gate=False,
+        )
         _doc_message["_protected"] = True
 
         # Auto-detect suggestion mode
@@ -2468,7 +2514,11 @@ def _build_system_prompt(
             f"recipient you can't identify. A bare 'send email saying X' = the "
             f"open email's sender.\n"
         )
-        _email_message = untrusted_context_message("active email reader", email_ctx)
+        _email_message = untrusted_context_message(
+            "active email reader",
+            email_ctx,
+            arm_tool_gate=False,
+        )
         _email_message["_protected"] = True
 
     # Inject writing style for any email writing path. This is deliberately
@@ -2533,6 +2583,7 @@ def _build_system_prompt(
                 _email_style_message = untrusted_context_message(
                     "email writing style",
                     "EMAIL WRITING STYLE AND IDENTITY — FOLLOW FOR ANY EMAIL DRAFT OR SEND:\n" + _style,
+                    arm_tool_gate=False,
                 )
         except Exception:
             pass
@@ -2664,7 +2715,11 @@ def _build_system_prompt(
                     _skills_text = "\n".join(lines)
                     if _skill_index_block:
                         _skills_text = _skill_index_block + "\n\n" + _skills_text
-                    _skills_message = untrusted_context_message("skills", _skills_text)
+                    _skills_message = untrusted_context_message(
+                        "skills",
+                        _skills_text,
+                        arm_tool_gate=False,
+                    )
                 else:
                     _skills_message = None
         except Exception as _sk_err:
@@ -2676,7 +2731,11 @@ def _build_system_prompt(
             from src.integrations import get_integrations_prompt
             _integ_prompt = get_integrations_prompt()
             if _integ_prompt:
-                _integ_message = untrusted_context_message("integrations", _integ_prompt)
+                _integ_message = untrusted_context_message(
+                    "integrations",
+                    _integ_prompt,
+                    arm_tool_gate=False,
+                )
         except Exception as _integ_err:
             logger.debug(f"Integration prompt injection skipped: {_integ_err}")
 
@@ -2685,7 +2744,11 @@ def _build_system_prompt(
         try:
             _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
             if _mcp_desc:
-                _mcp_desc_message = untrusted_context_message("MCP tools", _mcp_desc)
+                _mcp_desc_message = untrusted_context_message(
+                    "MCP tools",
+                    _mcp_desc,
+                    arm_tool_gate=False,
+                )
         except Exception as _mcp_err:
             logger.debug(f"MCP description injection skipped: {_mcp_err}")
 
@@ -2935,6 +2998,7 @@ def _append_tool_results(
     used_native: bool,
     round_num: int,
     round_reasoning: str = "",
+    tool_result_records: Optional[list] = None,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -2951,6 +3015,7 @@ def _append_tool_results(
     on the MOST RECENT assistant turn only: enough for DeepSeek continuity,
     without the per-round accumulation.
     """
+    tool_result_records = tool_result_records or []
     # Strip reasoning_content from earlier assistant turns; only the newest keeps it.
     for _m in messages:
         if _m.get("role") == "assistant":
@@ -2986,17 +3051,24 @@ def _append_tool_results(
         messages.append(assistant_msg)
         for j, tc in enumerate(native_tool_calls):
             result_text = tool_result_texts[j] if j < len(tool_result_texts) else ""
+            record = tool_result_records[j] if j < len(tool_result_records) else {}
+            tool_name = record.get("tool_name", tc.get("name", ""))
+            tool_content = record.get("content", tc.get("arguments", ""))
+            result = record.get(
+                "result",
+                tool_results[j] if j < len(tool_results) else None,
+            )
             result_message = {
                 "role": "tool",
                 "tool_call_id": tc.get("id", f"call_{round_num}_{j}"),
                 "content": result_text,
             }
-            capabilities = capabilities_for_tool(tc.get("name", ""))
+            capabilities = capabilities_for_action(tool_name, tool_content)
             if capabilities.result_integrity is not ResultIntegrity.SYSTEM:
                 result_message["metadata"] = {
                     "trusted": False,
-                    "source": f"tool result: {tc.get('name', '')}",
-                    "tool_gate_untrusted": True,
+                    "source": f"tool result: {tool_name}",
+                    "tool_gate_untrusted": tool_result_is_successful(result),
                 }
             messages.append(result_message)
     else:
@@ -3011,8 +3083,20 @@ def _append_tool_results(
         # data, not instructions — same hardening as skills (#788) and the
         # web/RAG context. THREAT_MODEL.md lists tool output as a surface that
         # must go through untrusted_context_message.
+        arm_tool_gate = any(
+            tool_result_is_successful(record.get("result"))
+            and capabilities_for_action(
+                record.get("tool_name"),
+                record.get("content"),
+            ).result_integrity is not ResultIntegrity.SYSTEM
+            for record in tool_result_records
+        )
         messages.append(
-            untrusted_context_message("tool execution results", tool_output_text)
+            untrusted_context_message(
+                "tool execution results",
+                tool_output_text,
+                arm_tool_gate=arm_tool_gate,
+            )
         )
 
 
@@ -4352,10 +4436,6 @@ async def stream_agent_loop(
     )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
-    # Document streaming state (persists across rounds)
-    _doc_acc = ""          # accumulated tool-call JSON arguments
-    _doc_opened = False    # whether doc_stream_open was sent
-    _doc_last_len = 0      # last content length sent
     _doc_stream_create_completed = False
     _ody_doc_tool_completed = False
 
@@ -4418,15 +4498,6 @@ async def stream_agent_loop(
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
-        # Reset doc streaming state per round
-        _doc_acc = ""
-        _doc_opened = False
-        _doc_last_len = 0
-        _doc_fence_offset = 0  # offset into round_response for text-fence content
-        # Cursor for the multi-block scanner — when a `create_document`
-        # fenced block closes we advance this so the next iteration can
-        # detect a SUBSEQUENT block in the same round.
-        _doc_scan_from = 0
 
         _active_route_state = {
             "messages": messages,
@@ -4707,43 +4778,10 @@ async def stream_agent_loop(
                     # IMPORTANT: check type-based events BEFORE "delta" key,
                     # because tool_call_delta also has an "arg_delta" field.
                     if data.get("type") == "tool_call_delta":
-                        if tool_policy and tool_policy.blocks(data.get("name")):
-                            continue
-                        # Stream document content to frontend as AI generates it
-                        logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
-                        _doc_acc += data.get("arg_delta", "")
-                        if not _doc_opened:
-                            tm = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
-                            if tm:
-                                _doc_opened = True
-                                try:
-                                    title = json.loads('"' + tm.group(1) + '"')
-                                except Exception:
-                                    title = tm.group(1)
-                                lm = re.search(r'"language"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
-                                lang = ""
-                                if lm:
-                                    try:
-                                        lang = json.loads('"' + lm.group(1) + '"')
-                                    except Exception:
-                                        lang = lm.group(1)
-                                logger.info(f"Doc streaming: open title={title!r} lang={lang!r}")
-                                yield f'data: {json.dumps({"type": "doc_stream_open", "title": title, "language": lang})}\n\n'
-                        if _doc_opened:
-                            cm = re.search(r'"content"\s*:\s*"', _doc_acc)
-                            if cm:
-                                raw = _doc_acc[cm.end():]
-                                raw = re.sub(r'"\s*\}\s*$', '', raw)
-                                try:
-                                    decoded = json.loads('"' + raw + '"')
-                                except Exception:
-                                    try:
-                                        decoded = json.loads('"' + raw.rstrip('\\') + '"')
-                                    except Exception:
-                                        decoded = raw.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
-                                if len(decoded) > _doc_last_len:
-                                    _doc_last_len = len(decoded)
-                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": decoded})}\n\n'
+                        # Tool-call argument deltas are model proposals, not an
+                        # authorization decision.  Document UI events are built
+                        # from the parsed ToolBlock only after successful dispatch.
+                        continue
                     elif data.get("type") == "tool_calls":
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
@@ -4901,64 +4939,6 @@ async def stream_agent_loop(
                             data["delta"] = _delta_text
                         if not _ody_qwen_finetune_model or data.get("thinking"):
                             yield f"data: {json.dumps(data)}\n\n"
-                        # Detect text-fence doc streaming. Normal agent prompts
-                        # use ```create_document; the doc LoRA streaming path
-                        # uses neutral ```document to avoid triggering learned
-                        # hidden native tool-call output.
-                        if (
-                            (round_num > 1 or _ody_doc_stream_create_mode)
-                            and not _doc_acc
-                            and not (tool_policy and tool_policy.blocks("create_document"))
-                        ):
-                            _fence_markers = (
-                                ('```document\n', '```documen\n')
-                                if _ody_doc_stream_create_mode
-                                else ('```create_document\n',)
-                            )
-                            _fence_marker = None
-                            for _mk in _fence_markers:
-                                _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
-                                if _candidate in round_response[_doc_scan_from:]:
-                                    _fence_marker = _candidate
-                                    break
-                            # Open a new block if we're not currently inside one
-                            # and there's an unstreamed marker in the response.
-                            # The marker search starts at the byte after the
-                            # last block's closing fence so the SECOND
-                            # `create_document` block in the same round gets
-                            # detected (previously only the first one was
-                            # streamed and the rest were silently dropped).
-                            if not _doc_opened and _fence_marker:
-                                _fi = round_response.index(_fence_marker, _doc_scan_from)
-                                _fa = round_response[_fi + len(_fence_marker):]
-                                _fl = _fa.split('\n')
-                                if _fl and _fl[0].strip():
-                                    _doc_opened = True
-                                    _ft = _fl[0].strip()
-                                    _kl = {'python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text'}
-                                    _flang = _fl[1].strip() if len(_fl) > 1 and _fl[1].strip().lower() in _kl else ''
-                                    _doc_fence_offset = _fi + len(_fence_marker) + len(_fl[0]) + 1
-                                    if _flang:
-                                        _doc_fence_offset += len(_fl[1]) + 1
-                                    _doc_last_len = 0
-                                    yield f'data: {json.dumps({"type": "doc_stream_open", "title": _ft, "language": _flang})}\n\n'
-                            if _doc_opened:
-                                _rc = round_response[_doc_fence_offset:]
-                                _ci = _rc.find('\n```')
-                                if _ci >= 0:
-                                    _rc = _rc[:_ci]
-                                if len(_rc) > _doc_last_len:
-                                    _doc_last_len = len(_rc)
-                                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": _rc})}\n\n'
-                                # If the closing fence has arrived, finalise
-                                # this block and arm detection of the NEXT
-                                # one. The model can emit multiple
-                                # `create_document` blocks in a single round.
-                                if _ci >= 0:
-                                    _doc_opened = False
-                                    _doc_scan_from = _doc_fence_offset + _ci + len('\n```')
-                                    _doc_fence_offset = 0
-                                    _doc_last_len = 0
                     elif data.get("error"):
                         err_msg = data.get("error", "unknown")
                         logger.error(f"Agent round {round_num}: stream error: {err_msg}")
@@ -5156,9 +5136,6 @@ async def stream_agent_loop(
                 doc_title = f"Code ({doc_lang})"
                 tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
                 tool_blocks.append(tb)
-                # Stream the document open event
-                yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
-                yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
                 logger.info(f"Auto-created document from {lang_tag} code block ({code_body.count(chr(10))+1} lines)")
                 break  # only auto-create one document per round
 
@@ -5370,44 +5347,10 @@ async def stream_agent_loop(
             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
             continue
 
-        # Pre-stream document content for fenced tool blocks (non-native path)
-        # Native path already streamed via tool_call_delta above
-        # For round 1 fenced blocks, frontend fence detection already handled streaming
-        if not _doc_opened and round_num == 1:
-            for block in tool_blocks:
-                if tool_policy and tool_policy.blocks(block.tool_type):
-                    continue
-                if block.tool_type == "create_document":
-                    _doc_opened = True
-                    break
-
-        if not _doc_opened:
-            for block in tool_blocks:
-                if tool_policy and tool_policy.blocks(block.tool_type):
-                    continue
-                if block.tool_type == "create_document":
-                    lines = block.content.strip().split("\n")
-                    title = lines[0].strip() if lines else "Untitled"
-                    lang = ""
-                    content_start = 1
-                    if len(lines) > 1 and len(lines[1].strip()) < 20 and lines[1].strip().isalpha():
-                        lang = lines[1].strip()
-                        content_start = 2
-                    content = "\n".join(lines[content_start:]) if len(lines) > content_start else ""
-                    yield f'data: {json.dumps({"type": "doc_stream_open", "title": title, "language": lang})}\n\n'
-                    if content:
-                        yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
-                    break
-                elif block.tool_type == "update_document":
-                    # Pre-stream the full replacement content so user sees it immediately
-                    content = block.content.strip()
-                    yield f'data: {json.dumps({"type": "doc_stream_open", "title": "", "language": ""})}\n\n'
-                    yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
-                    break
-
         # Execute each tool block
         tool_results = []
         tool_result_texts = []  # plain text for native tool role messages
+        tool_result_records = []  # aligned structured provenance for next round
         budget_hit = False
         for i, block in enumerate(tool_blocks):
             # --- Tool budget check ---
@@ -5426,7 +5369,10 @@ async def stream_agent_loop(
             else:
                 cmd_display = full_command
 
-            security_decision = run_security.decision_for(block.tool_type)
+            security_decision = run_security.decision_for(
+                block.tool_type,
+                block.content,
+            )
             _ody_clamped_tool_allowed = (
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
@@ -5505,7 +5451,7 @@ async def stream_agent_loop(
                         except (asyncio.CancelledError, Exception):
                             pass
 
-            run_security.observe_tool_result(block.tool_type, result)
+            run_security.observe_tool_result(block.tool_type, result, block.content)
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
@@ -5813,6 +5759,13 @@ async def stream_agent_loop(
                     f'data: {json.dumps({"type": "ask_user", "data": _pending_ask_user_event})}\n\n'
                 )
 
+            # Only a successful, authorized document execution may affect the
+            # editor.  Model deltas and raw fences are proposals and can be
+            # invalidated by an earlier result in the same tool batch.
+            if tool_result_is_successful(result):
+                for doc_event in _document_stream_events(block):
+                    yield f'data: {json.dumps(doc_event)}\n\n'
+
             # Native document tools open in the editor + carry the REAL doc id.
             # Emit a doc_update so the frontend opens/activates it and sends it
             # back as active_doc_id next turn (otherwise the agent can't "see"
@@ -5892,6 +5845,14 @@ async def stream_agent_loop(
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
+            tool_result_records.append(
+                {
+                    "tool_name": block.tool_type,
+                    "content": block.content,
+                    "result": result,
+                    "text": formatted,
+                }
+            )
             if (
                 _ody_doc_stream_create_mode
                 and block.tool_type == "create_document"
@@ -5942,7 +5903,8 @@ async def stream_agent_loop(
         # (and left the real call answered empty).
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
-                             round_reasoning=round_reasoning)
+                             round_reasoning=round_reasoning,
+                             tool_result_records=tool_result_records)
 
         # Emit agent_step event
         yield (

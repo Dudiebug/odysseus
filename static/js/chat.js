@@ -2152,9 +2152,6 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
         _roundDisplayProjector.reset();
         _replyDisplayProjector.reset();
         _docFenceOpened = false;
-        _docFenceContentStart = -1;
-        _docFenceCandidateStart = -1;
-        _docFenceCandidateMarker = '';
       }
       const esc = uiModule.esc;
       // Remove thinking spinner helper
@@ -2244,9 +2241,6 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
 
       // Document streaming state (text-fence detection)
       let _docFenceOpened = false;
-      let _docFenceContentStart = -1;
-      let _docFenceCandidateStart = -1;
-      let _docFenceCandidateMarker = '';
       const _thinkingAnalysisGate = createThinkingAnalysisGate({
         startsWithReasoningPrefix: markdownModule.startsWithReasoningPrefix,
       });
@@ -2841,42 +2835,11 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
 	                roundText += _delta;
 	                _roundDisplayProjector.append(_delta, roundText);
 
-	                // --- Text-fence doc streaming (for models that don't use native tool calls) ---
-                if (!_docFenceOpened && documentModule) {
-                  // Only inspect the newly appended boundary. Re-scanning the
-                  // full round for every reasoning delta is quadratic even
-                  // before thinking normalization runs.
-                  const fenceMarkers = ['```document\n', '```documen\n', '```create_document\n'];
-                  const fenceScanStart = Math.max(0, roundText.length - _delta.length - 24);
-                  if (_docFenceCandidateStart < 0) {
-                    for (const candidate of fenceMarkers) {
-                      const candidateIdx = roundText.indexOf(candidate, fenceScanStart);
-                      if (candidateIdx >= 0 && (_docFenceCandidateStart < 0 || candidateIdx < _docFenceCandidateStart)) {
-                        _docFenceCandidateMarker = candidate;
-                        _docFenceCandidateStart = candidateIdx;
-                      }
-                    }
-                  }
-                  if (_docFenceCandidateStart >= 0) {
-                    const afterFence = roundText.slice(_docFenceCandidateStart + _docFenceCandidateMarker.length);
-                    const fenceLines = afterFence.split('\n');
-                    if (fenceLines.length >= 1 && fenceLines[0].trim()) {
-                      _docFenceOpened = true;
-                      const title = fenceLines[0].trim();
-                      // Keep in sync with backend _KNOWN_LANGS in src/tool_implementations.py
-                      const knownLangs = ['python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text','plain','ruby','swift','kotlin','php','email','csv','xml','toml','ini'];
-                      const isLang = fenceLines.length >= 2 && knownLangs.includes(fenceLines[1].trim().toLowerCase());
-                      const lang = isLang ? fenceLines[1].trim() : '';
-                      _docFenceContentStart = _docFenceCandidateStart + _docFenceCandidateMarker.length + title.length + 1 + (isLang ? fenceLines[1].length + 1 : 0);
-                      documentModule.streamDocOpen(title, lang);
-                    }
-                  }
-                }
-                if (_docFenceOpened && _docFenceContentStart > 0 && documentModule) {
-                  let raw = roundText.slice(_docFenceContentStart);
-                  const closeIdx = raw.indexOf('\n```');
-                  if (closeIdx >= 0) raw = raw.slice(0, closeIdx);
-                  documentModule.streamDocDelta(raw);
+                // Raw model text is not authorization to mutate the editor.
+                // Detect document fences only for chat projection/status; the
+                // server emits doc_stream_* after successful dispatch.
+                if (!_docFenceOpened) {
+                  _docFenceOpened = /```(?:create_document|documen(?:t)?)\s*\n/i.test(roundText);
                 }
 
                 // Detect thinking-in-progress:
@@ -3796,9 +3759,6 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
                 _roundDisplayProjector.reset();
                 _replyDisplayProjector.reset();
                 _docFenceOpened = false;
-                _docFenceContentStart = -1;
-                _docFenceCandidateStart = -1;
-                _docFenceCandidateMarker = '';
                 const box = document.getElementById('chat-history');
                 const newWrap = document.createElement('div');
                 newWrap.className = 'msg msg-ai msg-continuation streaming';
