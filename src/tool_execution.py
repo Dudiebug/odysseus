@@ -570,6 +570,7 @@ async def _document_tool_dispatch(
     owner: Optional[str] = None,
     document_id: Optional[str] = None,
     document_version: Optional[int] = None,
+    document_digest: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
@@ -578,6 +579,7 @@ async def _document_tool_dispatch(
         "owner": owner,
         "doc_id": document_id,
         "expected_document_version": document_version,
+        "expected_document_digest": document_digest,
     }
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
@@ -645,6 +647,7 @@ async def execute_tool_block(
             and (
                 not exact_approval.pending.document_id
                 or exact_approval.pending.document_version is None
+                or not exact_approval.pending.document_digest
             )
         ):
             return (
@@ -725,6 +728,11 @@ async def execute_tool_block(
                 if approval_claimed
                 else None
             ),
+            approved_document_digest=(
+                exact_approval.pending.document_digest
+                if approval_claimed
+                else None
+            ),
         )
         if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
@@ -746,6 +754,7 @@ async def _execute_tool_block_impl(
     tool_policy: Optional[Any] = None,
     approved_document_id: Optional[str] = None,
     approved_document_version: Optional[int] = None,
+    approved_document_digest: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -914,6 +923,7 @@ async def _execute_tool_block_impl(
             owner,
             document_id=approved_document_id,
             document_version=approved_document_version,
+            document_digest=approved_document_digest,
         ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):

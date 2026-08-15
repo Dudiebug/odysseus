@@ -5,7 +5,7 @@ from collections import namedtuple
 
 import pytest
 
-from src.tool_approvals import ToolApprovalStore
+from src.tool_approvals import ToolApprovalStore, document_content_digest
 from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
 
 
@@ -121,6 +121,7 @@ def test_public_payload_shows_complete_action_but_not_authority_fields():
         content="printf safe\nSECOND_LINE",
         document_id="document-7",
         document_version=4,
+        document_digest=document_content_digest("original"),
     )
 
     payload = pending.public_payload()
@@ -184,6 +185,7 @@ async def test_dispatcher_uses_sealed_document_target(monkeypatch):
         content=content,
         document_id="document-7",
         document_version=4,
+        document_digest=document_content_digest("original"),
         capabilities=capabilities_for_action("update_document", content),
     )
     grant = store.consume(
@@ -199,6 +201,7 @@ async def test_dispatcher_uses_sealed_document_target(monkeypatch):
             (
                 kwargs.get("approved_document_id"),
                 kwargs.get("approved_document_version"),
+                kwargs.get("approved_document_digest"),
             )
         )
         return "update_document", {"output": "ok", "exit_code": 0}
@@ -220,7 +223,9 @@ async def test_dispatcher_uses_sealed_document_target(monkeypatch):
     )
 
     assert result["exit_code"] == 0
-    assert captured == [("document-7", 4)]
+    assert captured == [
+        ("document-7", 4, document_content_digest("original"))
+    ]
 
 
 @pytest.mark.asyncio
@@ -268,7 +273,11 @@ async def test_dispatcher_rejects_approved_document_action_without_target(monkey
 def test_approved_document_version_guard_rejects_changed_target():
     from src.agent_tools.document_tools import _approved_document_version_error
 
-    doc = type("Document", (), {"version_count": 5})()
+    doc = type(
+        "Document",
+        (),
+        {"version_count": 5, "current_content": "original"},
+    )()
 
     assert _approved_document_version_error(
         doc,
@@ -276,8 +285,18 @@ def test_approved_document_version_guard_rejects_changed_target():
     )["document_changed"] is True
     assert _approved_document_version_error(
         doc,
-        {"expected_document_version": 5},
+        {
+            "expected_document_version": 5,
+            "expected_document_digest": document_content_digest("original"),
+        },
     ) is None
+    assert _approved_document_version_error(
+        doc,
+        {
+            "expected_document_version": 5,
+            "expected_document_digest": document_content_digest("changed"),
+        },
+    )["document_changed"] is True
     assert _approved_document_version_error(
         None,
         {"expected_document_version": 5},

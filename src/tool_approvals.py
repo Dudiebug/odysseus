@@ -43,6 +43,11 @@ def _canonical_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def document_content_digest(content: Any) -> str:
+    """Return the stable server-side fingerprint used to seal a document."""
+    return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
+
+
 def _binding_payload(
     *,
     owner: Any,
@@ -53,6 +58,7 @@ def _binding_payload(
     workspace: Any,
     document_id: Any,
     document_version: Any,
+    document_digest: Any,
     external_untrusted_context_seen: bool,
     effects: tuple[str, ...],
     result_integrity: str,
@@ -68,6 +74,7 @@ def _binding_payload(
         "document_version": (
             int(document_version) if document_version is not None else None
         ),
+        "document_digest": str(document_digest or "").strip().lower(),
         "external_untrusted_context_seen": bool(external_untrusted_context_seen),
         "effects": list(effects),
         "result_integrity": str(result_integrity),
@@ -85,6 +92,7 @@ class PendingToolApproval:
     workspace: str
     document_id: str
     document_version: int | None
+    document_digest: str
     external_untrusted_context_seen: bool
     effects: tuple[str, ...]
     result_integrity: str
@@ -163,6 +171,7 @@ class ExactToolApproval:
             workspace=workspace,
             document_id=self.pending.document_id,
             document_version=self.pending.document_version,
+            document_digest=self.pending.document_digest,
             external_untrusted_context_seen=(
                 self.pending.external_untrusted_context_seen
             ),
@@ -245,6 +254,7 @@ class ToolApprovalStore:
         workspace: Any,
         document_id: Any = None,
         document_version: Any = None,
+        document_digest: Any = None,
         external_untrusted_context_seen: bool,
         capabilities: ToolCapabilities,
     ) -> PendingToolApproval:
@@ -260,6 +270,7 @@ class ToolApprovalStore:
             workspace=workspace,
             document_id=document_id,
             document_version=document_version,
+            document_digest=document_digest,
             external_untrusted_context_seen=external_untrusted_context_seen,
             effects=effects,
             result_integrity=result_integrity,
@@ -274,6 +285,7 @@ class ToolApprovalStore:
             workspace=payload["workspace"],
             document_id=payload["document_id"],
             document_version=payload["document_version"],
+            document_digest=payload["document_digest"],
             external_untrusted_context_seen=payload[
                 "external_untrusted_context_seen"
             ],

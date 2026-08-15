@@ -43,7 +43,11 @@ from src.tool_capabilities import (
     tool_result_is_successful,
     tool_result_should_arm_gate,
 )
-from src.tool_approvals import ExactToolApproval, tool_approval_store
+from src.tool_approvals import (
+    ExactToolApproval,
+    document_content_digest,
+    tool_approval_store,
+)
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
     parse_tool_blocks,
@@ -5665,6 +5669,17 @@ async def stream_agent_loop(
                             approval_document,
                             "version_count",
                             None,
+                        ),
+                        document_digest=(
+                            document_content_digest(
+                                getattr(
+                                    approval_document,
+                                    "current_content",
+                                    "",
+                                )
+                            )
+                            if approval_document is not None
+                            else None
                         ),
                         external_untrusted_context_seen=(
                             run_security.external_untrusted_context_seen

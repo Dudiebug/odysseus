@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 import logging
 import re
 from src.constants import MAX_READ_CHARS
+from src.tool_approvals import document_content_digest
 from src.tool_utils import _parse_tool_args, get_upload_handler
 from src.upload_handler import reserve_upload_references
 
@@ -82,14 +83,27 @@ def _most_recent_owned_document(db, Document, owner: Optional[str], active_only:
 
 def _approved_document_version_error(doc: Any, ctx: dict) -> Optional[Dict]:
     """Reject a sealed document action when its target changed meanwhile."""
-    expected = ctx.get("expected_document_version")
-    if expected is None:
+    expected_version = ctx.get("expected_document_version")
+    expected_digest = (
+        str(ctx.get("expected_document_digest") or "").strip().lower()
+    )
+    if expected_version is None and not expected_digest:
         return None
     try:
-        unchanged = int(getattr(doc, "version_count", -1)) == int(expected)
+        version_unchanged = (
+            expected_version is None
+            or int(getattr(doc, "version_count", -1)) == int(expected_version)
+        )
     except (TypeError, ValueError):
-        unchanged = False
-    if unchanged:
+        version_unchanged = False
+    content_unchanged = True
+    if expected_digest:
+        content_unchanged = (
+            doc is not None
+            and document_content_digest(getattr(doc, "current_content", ""))
+            == expected_digest
+        )
+    if version_unchanged and content_unchanged:
         return None
     return {
         "error": (
