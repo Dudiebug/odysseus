@@ -132,7 +132,6 @@ _register(
         "create_session",
         "draft_email",
         "draft_email_reply",
-        "edit_document",
         "manage_calendar",
         "manage_contact",
         "manage_documents",
@@ -144,9 +143,16 @@ _register(
         "manage_tasks",
         "suggest_document",
         "todowrite",
-        "update_document",
     },
     ToolEffect.WRITE_PRIVATE,
+)
+_register(
+    {"edit_document", "update_document"},
+    ToolEffect.WRITE_PRIVATE,
+    # These tools can echo stored document content that was not present in
+    # their arguments.  edit_document returns the complete edited document;
+    # update_document also preserves stored email headers/thread history.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"pipeline"},

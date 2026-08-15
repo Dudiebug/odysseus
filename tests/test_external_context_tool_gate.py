@@ -341,6 +341,22 @@ def test_cross_model_results_taint_before_later_host_actions(tool_name):
     assert context.decision_for("bash").allowed is False
 
 
+@pytest.mark.parametrize("tool_name", ["edit_document", "update_document"])
+def test_stored_document_results_taint_before_later_host_actions(tool_name):
+    context = ToolRunSecurityContext()
+
+    capabilities = capabilities_for_tool(tool_name)
+    assert capabilities.result_integrity is ResultIntegrity.EXTERNAL_UNTRUSTED
+    context.observe_tool_result(
+        tool_name,
+        {"content": "stored attacker-controlled content", "exit_code": 0},
+        "model-proposed replacement",
+    )
+
+    assert context.external_untrusted_context_seen is True
+    assert context.decision_for("bash").allowed is False
+
+
 @pytest.mark.parametrize(
     "tool_name,content",
     [
@@ -403,6 +419,7 @@ def test_ambiguous_private_manager_action_fails_high():
         ("web_search", {"output": "external", "exit_code": 0}, True),
         ("web_search", {"error": "offline", "exit_code": 1}, False),
         ("list_served_models", {"output": "local status", "exit_code": 0}, False),
+        ("edit_document", {"content": "stored content", "exit_code": 0}, True),
     ],
 )
 def test_result_folding_is_transport_and_status_consistent(
