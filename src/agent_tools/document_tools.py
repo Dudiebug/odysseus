@@ -475,6 +475,12 @@ class UpdateDocumentTool:
             doc = None
             if target_id:
                 doc = _get_owned_document(db, Document, target_id, owner)
+            if (
+                not doc
+                and target_id
+                and ctx.get("expected_document_version") is not None
+            ):
+                return _approved_document_version_error(None, ctx)
             if not doc:
                 doc = _most_recent_owned_document(db, Document, owner)
                 if doc:
@@ -555,6 +561,12 @@ class EditDocumentTool:
             doc = None
             if target_id:
                 doc = _get_owned_document(db, Document, target_id, owner)
+            if (
+                not doc
+                and target_id
+                and ctx.get("expected_document_version") is not None
+            ):
+                return _approved_document_version_error(None, ctx)
             if not doc:
                 # Fallback: most recently updated document. Avoids "no active doc" errors
                 # after server restart or when the agent loses track of which doc to edit.

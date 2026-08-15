@@ -61,10 +61,9 @@ def test_approval_is_bound_to_exact_action_and_claimed_once():
     )
 
 
-def test_wrong_owner_and_deny_destructively_consume_pending_action():
+def test_wrong_owner_cannot_consume_but_deny_retires_pending_action():
     store = ToolApprovalStore()
     wrong_owner = _pending(store)
-    denied = _pending(store)
 
     assert store.consume(
         wrong_owner.approval_id,
@@ -72,7 +71,9 @@ def test_wrong_owner_and_deny_destructively_consume_pending_action():
         owner="mallory",
         session_id="session-1",
     ) is None
-    assert store.peek(wrong_owner.approval_id) is None
+    assert store.peek(wrong_owner.approval_id) == wrong_owner
+
+    denied = _pending(store)
     assert store.consume(
         denied.approval_id,
         decision="deny",
@@ -222,6 +223,48 @@ async def test_dispatcher_uses_sealed_document_target(monkeypatch):
     assert captured == [("document-7", 4)]
 
 
+@pytest.mark.asyncio
+async def test_dispatcher_rejects_approved_document_action_without_target(monkeypatch):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    content = "replacement"
+    pending = _pending(
+        store,
+        tool_name="update_document",
+        content=content,
+        capabilities=capabilities_for_action("update_document", content),
+    )
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    async def should_not_run(*args, **kwargs):
+        raise AssertionError("unsealed document target reached implementation")
+
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        should_not_run,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("update_document", content),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
+
+    assert result["blocked"] is True
+    assert result["policy"] == "exact_tool_approval"
+
+
 def test_approved_document_version_guard_rejects_changed_target():
     from src.agent_tools.document_tools import _approved_document_version_error
 
@@ -235,6 +278,48 @@ def test_approved_document_version_guard_rejects_changed_target():
         doc,
         {"expected_document_version": 5},
     ) is None
+    assert _approved_document_version_error(
+        None,
+        {"expected_document_version": 5},
+    )["document_changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_sealed_document_does_not_fall_back_to_another(monkeypatch):
+    import src.agent_tools.document_tools as document_tools
+
+    class FakeDb:
+        def close(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr("src.database.SessionLocal", lambda: FakeDb())
+    monkeypatch.setattr(
+        document_tools,
+        "_get_owned_document",
+        lambda *args, **kwargs: None,
+    )
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("sealed target fell back to a different document")
+
+    monkeypatch.setattr(
+        document_tools,
+        "_most_recent_owned_document",
+        fail_fallback,
+    )
+    result = await document_tools.UpdateDocumentTool().execute(
+        "replacement",
+        {
+            "doc_id": "deleted-document",
+            "expected_document_version": 4,
+            "owner": "alice",
+        },
+    )
+
+    assert result["document_changed"] is True
 
 
 @pytest.mark.asyncio

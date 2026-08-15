@@ -323,14 +323,19 @@ class ToolApprovalStore:
         now = time.time()
         with self._lock:
             self._purge_expired_locked(now)
-            pending = self._pending.pop(str(approval_id or ""), None)
-        if pending is None:
-            return None
-        if (
-            pending.owner != _normalized_owner(owner)
-            or pending.session_id != str(session_id or "")
-        ):
-            return None
+            approval_key = str(approval_id or "")
+            pending = self._pending.get(approval_key)
+            if pending is None:
+                return None
+            if (
+                pending.owner != _normalized_owner(owner)
+                or pending.session_id != str(session_id or "")
+            ):
+                # Authentication is checked before destructive consumption so
+                # a leaked/guessed opaque id cannot be used to invalidate
+                # another owner's pending action.
+                return None
+            self._pending.pop(approval_key, None)
         if str(decision or "").strip().lower() != "approve":
             return None
         return ExactToolApproval(pending)

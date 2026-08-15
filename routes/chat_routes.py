@@ -915,6 +915,7 @@ def setup_chat_routes(
             or (body or {}).get("tool_approval_decision")
         )
         exact_tool_approval = None
+        tool_approval_continuation = False
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -1087,6 +1088,7 @@ def setup_chat_routes(
                     owner=owner,
                     session_id=session,
                 )
+                tool_approval_continuation = True
                 if decision == "approve" and exact_tool_approval is None:
                     raise HTTPException(
                         409,
@@ -1186,14 +1188,24 @@ def setup_chat_routes(
         resolve_session_auth(sess, session, owner=effective_user(request))
 
         # Check for research_pending BEFORE mode persist overwrites it
-        do_research = str(use_research).lower() == "true"
-        if not do_research:
+        # An approval response resumes the sealed agent action.  Do not let
+        # mutable form fields, or a stale research_pending session marker,
+        # consume the one-use grant on the unrelated research path.
+        do_research = (
+            not tool_approval_continuation
+            and str(use_research).lower() == "true"
+        )
+        if not do_research and not tool_approval_continuation:
             if get_session_mode(session) == 'research_pending':
                 do_research = True
                 logger.info(f"Session {session} in research_pending — auto-triggering research")
 
         att_ids = []
-        if body and isinstance(body.get("attachments"), list):
+        if tool_approval_continuation:
+            # Browser composer state is unrelated to the action that was
+            # reviewed.  The original turn remains in session history.
+            att_ids = []
+        elif body and isinstance(body.get("attachments"), list):
             att_ids = [str(x) for x in body["attachments"]]
         elif attachments:
             try:

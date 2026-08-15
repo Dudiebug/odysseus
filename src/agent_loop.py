@@ -5629,40 +5629,64 @@ async def stream_agent_loop(
                     in {"edit_document", "suggest_document", "update_document"}
                     else None
                 )
-                pending_approval = tool_approval_store.create(
-                    owner=owner,
-                    session_id=session_id,
-                    origin_run_id=run_security.run_id,
-                    tool_name=block.tool_type,
-                    content=block.content,
-                    workspace=workspace,
-                    document_id=getattr(approval_document, "id", None),
-                    document_version=getattr(
-                        approval_document,
-                        "version_count",
-                        None,
-                    ),
-                    external_untrusted_context_seen=(
-                        run_security.external_untrusted_context_seen
-                    ),
-                    capabilities=capabilities_for_action(
+                if (
+                    block.tool_type
+                    in {"edit_document", "suggest_document", "update_document"}
+                    and (
+                        approval_document is None
+                        or getattr(approval_document, "id", None) is None
+                        or getattr(approval_document, "version_count", None) is None
+                    )
+                ):
+                    # These legacy tools otherwise fall back to a process-global
+                    # or most-recent document at dispatch time. That target can
+                    # change while an approval card is pending, so there is no
+                    # exact action to seal until the user opens a real document.
+                    desc = f"{block.tool_type}: BLOCKED"
+                    result = {
+                        "error": (
+                            "Open the exact document to edit, then request this "
+                            "action again so its id and version can be sealed."
+                        ),
+                        "exit_code": 1,
+                        "blocked": True,
+                        "policy": "exact_tool_approval_target",
+                    }
+                else:
+                    pending_approval = tool_approval_store.create(
+                        owner=owner,
+                        session_id=session_id,
+                        origin_run_id=run_security.run_id,
+                        tool_name=block.tool_type,
+                        content=block.content,
+                        workspace=workspace,
+                        document_id=getattr(approval_document, "id", None),
+                        document_version=getattr(
+                            approval_document,
+                            "version_count",
+                            None,
+                        ),
+                        external_untrusted_context_seen=(
+                            run_security.external_untrusted_context_seen
+                        ),
+                        capabilities=capabilities_for_action(
+                            block.tool_type,
+                            block.content,
+                        ),
+                    )
+                    desc = f"{block.tool_type}: APPROVAL REQUIRED"
+                    result = {
+                        "output": "Waiting for an exact user approval.",
+                        "exit_code": None,
+                        "approval_required": True,
+                        "ask_user": pending_approval.public_payload(
+                            reason=security_decision.reason,
+                        ),
+                    }
+                    logger.info(
+                        "Exact approval required before tool start: %s",
                         block.tool_type,
-                        block.content,
-                    ),
-                )
-                desc = f"{block.tool_type}: APPROVAL REQUIRED"
-                result = {
-                    "output": "Waiting for an exact user approval.",
-                    "exit_code": None,
-                    "approval_required": True,
-                    "ask_user": pending_approval.public_payload(
-                        reason=security_decision.reason,
-                    ),
-                }
-                logger.info(
-                    "Exact approval required before tool start: %s",
-                    block.tool_type,
-                )
+                    )
             elif tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -6325,7 +6349,7 @@ async def stream_agent_loop(
     # gets a turn (with its own tool calls forwarded to the user) and
     # a skill is saved ONLY if the teacher actually succeeds. Skipped
     # when we ARE the teacher to avoid recursion.
-    if not _is_teacher_run and not guide_only:
+    if not _is_teacher_run and not guide_only and not _awaiting_user:
         try:
             from src.teacher_escalation import run_teacher_inline
             async for evt in run_teacher_inline(
@@ -6334,6 +6358,12 @@ async def stream_agent_loop(
                 student_tool_events=tool_events,
                 student_reply=full_response,
                 owner=owner,
+                session_id=session_id,
+                workspace=workspace,
+                disabled_tools=disabled_tools,
+                tool_policy=tool_policy,
+                active_document=active_document,
+                active_email=active_email,
             ):
                 yield evt
         except Exception as _esc_err:

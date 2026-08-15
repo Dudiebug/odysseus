@@ -563,6 +563,12 @@ async def run_teacher_inline(
     student_tool_events: List[Dict[str, Any]],
     student_reply: str,
     owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    disabled_tools: Optional[set[str]] = None,
+    tool_policy: Any = None,
+    active_document: Any = None,
+    active_email: Optional[Dict[str, str]] = None,
 ):
     """Async generator. Yields SSE event strings.
 
@@ -668,6 +674,12 @@ async def run_teacher_inline(
         messages=teacher_messages,
         headers=teacher_headers,
         owner=owner,
+        session_id=session_id,
+        workspace=workspace,
+        disabled_tools=disabled_tools,
+        tool_policy=tool_policy,
+        active_document=active_document,
+        active_email=active_email,
         _is_teacher_run=True,
     ):
         # Swallow teacher's own [DONE] — outer loop emits the real one
@@ -683,12 +695,15 @@ async def run_teacher_inline(
                 payload["teacher"] = True
                 typ = payload.get("type")
                 if typ == "tool_output":
-                    captured_tool_events.append({
+                    captured_tool_event = {
                         "tool": payload.get("tool"),
                         "command": payload.get("command"),
                         "output": payload.get("output"),
                         "exit_code": payload.get("exit_code"),
-                    })
+                    }
+                    if isinstance(payload.get("ask_user"), dict):
+                        captured_tool_event["ask_user"] = payload["ask_user"]
+                    captured_tool_events.append(captured_tool_event)
                 if "delta" in payload and isinstance(payload["delta"], str):
                     if payload.get("thinking"):
                         continue
@@ -696,6 +711,12 @@ async def run_teacher_inline(
                 yield 'data: ' + json.dumps(payload) + '\n\n'
                 continue
         yield evt_str
+
+    # A takeover that paused for a question or exact action has not completed
+    # yet. Its server-owned approval card is already in the live/persisted tool
+    # events; do not evaluate the partial trace or distill it into a skill.
+    if any(event.get("ask_user") for event in captured_tool_events):
+        return
 
     teacher_text = "".join(captured_text_parts).strip()
     t_status, t_reason = evaluate_turn_regex(captured_tool_events, teacher_text)

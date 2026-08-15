@@ -332,6 +332,26 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
     }
 )
 
+_ACTION_DESTRUCTIVE: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "manage_calendar": frozenset({"delete_event"}),
+        "manage_contact": frozenset({"delete"}),
+        "manage_documents": frozenset({"delete", "tidy"}),
+        "manage_endpoints": frozenset({"delete"}),
+        "manage_bg_jobs": frozenset({"kill", "stop", "cancel", "terminate"}),
+        "manage_memory": frozenset({"delete"}),
+        "manage_mcp": frozenset({"delete"}),
+        "manage_notes": frozenset({"delete"}),
+        "manage_research": frozenset({"delete"}),
+        "manage_session": frozenset({"delete", "truncate"}),
+        "manage_settings": frozenset({"delete", "reset"}),
+        "manage_skills": frozenset({"delete"}),
+        "manage_tasks": frozenset({"delete"}),
+        "manage_tokens": frozenset({"delete"}),
+        "manage_webhooks": frozenset({"delete"}),
+    }
+)
+
 _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
     {
         "manage_calendar": "list_events",
@@ -415,18 +435,30 @@ def _action_from_content(tool_name: str, content: Any) -> str | None:
 def capabilities_for_action(tool_name: Any, content: Any) -> ToolCapabilities:
     """Classify a sealed multiplexed action; ambiguous actions fail high."""
     base = capabilities_for_tool(tool_name)
-    if not isinstance(tool_name, str) or tool_name not in _PRIVATE_ACTION_READS:
+    if not isinstance(tool_name, str):
         return base
 
     action = _action_from_content(tool_name, content)
+    destructive = action in _ACTION_DESTRUCTIVE.get(tool_name, ())
+    if tool_name not in _PRIVATE_ACTION_READS:
+        if not destructive:
+            return base
+        return ToolCapabilities(
+            frozenset(set(base.effects) | {ToolEffect.DESTRUCTIVE}),
+            base.result_integrity,
+            known=base.known,
+        )
     if action in _PRIVATE_ACTION_READS[tool_name]:
         return _capabilities(
             ToolEffect.READ_PRIVATE,
             result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
         )
     if action in _PRIVATE_ACTION_WRITES[tool_name]:
+        effects = set(base.effects)
+        if destructive:
+            effects.add(ToolEffect.DESTRUCTIVE)
         return ToolCapabilities(
-            base.effects,
+            frozenset(effects),
             ResultIntegrity.EXTERNAL_UNTRUSTED,
             known=base.known,
         )

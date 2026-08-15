@@ -1367,7 +1367,7 @@ document.addEventListener('click', function(e) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js?v=20260722emailfastindex1').then(mod => {
+    import('./document.js?v=20260815approvalsave1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1389,7 +1389,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
+    import('./emailLibrary.js?v=20260815approvalsave1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -2433,6 +2433,9 @@ export function renderAskUserCard(payload, options) {
               approval_id: aq.approval_id,
               decision: String((opt && opt.value) || '').toLowerCase(),
               label,
+              document_id: aq.action && aq.action.document_id
+                ? String(aq.action.document_id)
+                : '',
             },
           }));
         } else {

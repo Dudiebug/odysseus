@@ -93,6 +93,7 @@ def _chat_stream_endpoint(
     agent_chunks=None,
     chat_chunks=None,
     capture_completion=False,
+    capture_context=False,
     endpoint_url="https://selected.example/v1",
 ):
     def add_message(message):
@@ -136,6 +137,8 @@ def _chat_stream_endpoint(
     )
 
     async def fake_build_context(*args, **kwargs):
+        if capture_context:
+            captured["build_context"] = kwargs
         return context
 
     async def fake_chat_stream(candidates, messages, **kwargs):
@@ -334,6 +337,48 @@ async def test_chat_stream_approval_restores_exact_shell_turn_toggle(monkeypatch
 
     assert captured["exact_approval"].pending == pending
     assert "bash" not in captured["approval_disabled_tools"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_approval_ignores_research_and_new_attachments(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(
+        monkeypatch,
+        "agent",
+        captured,
+        capture_context=True,
+    )
+    monkeypatch.setattr(chat_routes, "get_session_mode", lambda _session_id: "research_pending")
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice",
+        session_id="session-1",
+        origin_run_id="run-1",
+        tool_name="bash",
+        content="printf exact",
+        workspace=None,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("bash", "printf exact"),
+    )
+    request = _RouteRequest("agent")
+    request._form.update(
+        {
+            "attachments": '["unrelated-upload"]',
+            "use_research": "true",
+            "tool_approval_id": pending.approval_id,
+            "tool_approval_decision": "approve",
+        }
+    )
+
+    response = await endpoint(request)
+    async for _ in response.body_iterator:
+        pass
+
+    assert captured["exact_approval"].pending == pending
+    assert captured["build_context"]["att_ids"] == []
+    assert "agent" in captured
+    assert "chat" not in captured
 
 
 @pytest.mark.asyncio

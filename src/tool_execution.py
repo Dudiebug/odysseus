@@ -639,6 +639,26 @@ async def execute_tool_block(
                     "policy": "exact_tool_approval",
                 },
             )
+        if (
+            exact_approval.pending.tool_name
+            in {"edit_document", "suggest_document", "update_document"}
+            and (
+                not exact_approval.pending.document_id
+                or exact_approval.pending.document_version is None
+            )
+        ):
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": (
+                        "The approved document action has no sealed target and "
+                        "cannot be executed."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
         sealed_workspace = exact_approval.pending.workspace
         if sealed_workspace and vet_workspace(sealed_workspace) != sealed_workspace:
             return (

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 import pytest
 
@@ -215,6 +216,87 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     assert any("teacher_takeover" in evt for evt in events)
     assert any("tool_output" in evt for evt in events)
     assert any("skill_saved" in evt for evt in events)
+
+
+@pytest.mark.asyncio
+async def test_teacher_approval_keeps_parent_authority_and_skips_skill_save(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.settings.get_setting",
+        lambda key, default=None: {
+            "teacher_enabled": True,
+            "teacher_model": "teacher-model",
+        }.get(key, default),
+    )
+    monkeypatch.setattr(
+        "src.ai_interaction._resolve_model",
+        lambda spec, owner=None: (
+            "http://teacher.local/v1",
+            "teacher-model",
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.teacher_escalation.evaluate_turn_regex",
+        lambda *args: ("failure", "student failed"),
+    )
+    captured = {}
+    approval = {
+        "kind": "tool_approval",
+        "approval_id": "opaque-id",
+        "question": "Allow this exact action once?",
+    }
+
+    async def fake_stream_agent_loop(*args, **kwargs):
+        captured.update(kwargs)
+        yield "data: " + json.dumps({
+            "type": "tool_output",
+            "tool": "bash",
+            "output": "Waiting for an exact user approval.",
+            "ask_user": approval,
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def fail_skill_distillation(*args, **kwargs):
+        raise AssertionError("paused teacher trace was distilled into a skill")
+
+    monkeypatch.setattr(
+        "src.agent_loop.stream_agent_loop",
+        fake_stream_agent_loop,
+    )
+    monkeypatch.setattr(
+        "src.teacher_escalation._call_teacher",
+        fail_skill_distillation,
+    )
+    active_document = object()
+    active_email = {"uid": "email-1"}
+    policy = object()
+
+    events = []
+    async for evt in teacher_escalation.run_teacher_inline(
+        student_endpoint_url="http://student.local/v1",
+        student_messages=[{"role": "user", "content": "test request"}],
+        student_tool_events=[],
+        student_reply="student reply",
+        owner="alice",
+        session_id="session-1",
+        workspace="/workspace",
+        disabled_tools={"web_fetch"},
+        tool_policy=policy,
+        active_document=active_document,
+        active_email=active_email,
+    ):
+        events.append(evt)
+
+    assert captured["session_id"] == "session-1"
+    assert captured["workspace"] == "/workspace"
+    assert captured["disabled_tools"] == {"web_fetch"}
+    assert captured["tool_policy"] is policy
+    assert captured["active_document"] is active_document
+    assert captured["active_email"] == active_email
+    assert any("opaque-id" in event for event in events)
+    assert not any("skill_saved" in event for event in events)
 
 
 @pytest.mark.asyncio

@@ -8,18 +8,18 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260815toolapproval3';
-import chatStream from './chatStream.js';
+import chatRenderer from './chatRenderer.js?v=20260815toolapproval4';
+import chatStream from './chatStream.js?v=20260815approvalsave1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
 import searchModule from './search.js';
-import documentModule from './document.js?v=20260722emailfastindex1';
-import * as emailInbox from './emailInbox.js?v=20260722emailfastindex1';
+import documentModule from './document.js?v=20260815approvalsave1';
+import * as emailInbox from './emailInbox.js?v=20260815approvalsave1';
 import codeRunnerModule from './codeRunner.js';
-import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260722emailfastindex1';
+import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260815approvalsave1';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
@@ -72,6 +72,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     }
     const input = document.getElementById('message');
     if (input) {
+      _pendingToolApproval.draft = input.value || '';
       input.value = label;
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -86,6 +87,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     _pendingToolApproval = {
       approval_id: String(detail.approval_id),
       decision,
+      document_id: String(detail.document_id || ''),
     };
     _submitToolApprovalWhenIdle(
       _pendingToolApproval.approval_id,
@@ -1267,6 +1269,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     if (_sendInFlight) return;
     const _sendPerf = _createChatSendPerf();
     _sendInFlight = true;
+    const approvalForSend = _pendingToolApproval;
     _setForegroundChatBusy(true);
     // Instant visual feedback so the user sees their click was accepted
     // even before the streaming button state kicks in below.
@@ -1281,7 +1284,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     };
 
     // --- Setup mode: intercept next message (but let slash commands through) ---
-    {
+    if (!approvalForSend) {
       const el = uiModule.el;
       const rawMsg = (el('message').value || '').trim();
       const currentSetupMode = slashCommands.getSetupMode();
@@ -1311,7 +1314,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     if (!msg.trim() && !fileHandlerModule.getPendingCount() && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) { _releaseSendFlag(); return; }
 
     // --- Slash commands: execute directly without AI (no session needed) ---
-    if (isCommand(msg.trim())) {
+    if (!approvalForSend && isCommand(msg.trim())) {
       const handled = await handleSlashCommand(msg.trim());
       if (handled) {
         el('message').value = '';
@@ -1438,7 +1441,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     }
 
     // --- API key guard: warn if message looks like an API key ---
-    if (API_KEY_RE.test(msg.trim())) {
+    if (!approvalForSend && API_KEY_RE.test(msg.trim())) {
       if (!await window.styledConfirm('This looks like an API key. Sending it to the AI could expose it.\n\nDid you mean to use /setup instead?', { confirmText: 'Send anyway', danger: true })) {
         _releaseSendFlag();
         return;
@@ -1573,7 +1576,9 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       if (sessionModule.clearStreamComplete) sessionModule.clearStreamComplete(sessionModule.getCurrentSessionId());
 
       // Check for document selection context before consuming display override
-      const docSel = documentModule && documentModule.getSelectionContext();
+      const docSel = !approvalForSend && documentModule
+        ? documentModule.getSelectionContext()
+        : null;
       if (docSel) {
         const sels = Array.isArray(docSel) ? docSel : [docSel];
         const lineRefs = sels.map(s =>
@@ -1593,7 +1598,9 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       // stuck flag can't silently eat the next turn's recovery budget.
       if (!skipBubble) { _autoNudges = 0; _autoContinuePending = false; }
       else if (_autoContinuePending) { _autoContinuePending = false; }
-      const _pendingAttachInfo = fileHandlerModule.getPendingCount() ? fileHandlerModule.getPendingInfo() : null;
+      const _pendingAttachInfo = !approvalForSend && fileHandlerModule.getPendingCount()
+        ? fileHandlerModule.getPendingInfo()
+        : null;
       // Pre-read importable file contents before upload clears pending files
       const IMPORTABLE_EXT = /\.(txt|py|js|ts|html|htm|css|md|json|csv|yml|yaml|sh|sql|rs|go|java|c|cpp|h|rb|php|xml|jsx|tsx|log|toml|ini|conf|env|vue|svelte|scss|sass|less)$/i;
       const _importableFiles = [];
@@ -1611,7 +1618,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
         _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
       }
       _sendPerf.mark('user_bubble_visible');
-      messageInput.value = '';
+      messageInput.value = approvalForSend ? (approvalForSend.draft || '') : '';
       messageInput.style.height = '';
       messageInput.dispatchEvent(new Event('input'));
       // Mobile: dismiss the on-screen keyboard after sending. iOS in
@@ -1645,13 +1652,15 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       }
 
       let ids = [];
-      try {
-        _sendPerf.mark('upload_begin');
-        ids = await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() });
-        _sendPerf.mark('upload_done');
-      } catch(e) {
-        console.error('upload failed', e);
-        _sendPerf.mark('upload_failed');
+      if (!approvalForSend) {
+        try {
+          _sendPerf.mark('upload_begin');
+          ids = await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() });
+          _sendPerf.mark('upload_done');
+        } catch(e) {
+          console.error('upload failed', e);
+          _sendPerf.mark('upload_failed');
+        }
       }
       if (_pendingAttachInfo && !ids.length && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) {
         if (_userMsgEl && _userMsgEl.parentNode) _userMsgEl.remove();
@@ -1668,10 +1677,10 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       // edited OCR text via the server-side .vision cache). Always CONSUME the
       // slot — even when empty / errored — so the regen ids can't bleed into
       // an unrelated next message if uploadPending() above had thrown.
-      if (_pendingRegenAttachments && _pendingRegenAttachments.length) {
+      if (!approvalForSend && _pendingRegenAttachments && _pendingRegenAttachments.length) {
         ids = ids.concat(_pendingRegenAttachments);
       }
-      _pendingRegenAttachments = null;
+      if (!approvalForSend) _pendingRegenAttachments = null;
 
       // The optimistic user bubble was rendered before the upload assigned ids,
       // so image previews couldn't show (the renderer needs att.id). Now that
@@ -1752,14 +1761,50 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       if (activeEmailComposerCtx?.docId) {
         activeDocIdForSend = activeEmailComposerCtx.docId;
       }
-      if (documentModule && activeDocIdForSend) {
+      const shouldSaveActiveDoc = !approvalForSend || (
+        approvalForSend.document_id
+        && approvalForSend.document_id === activeDocIdForSend
+      );
+      if (documentModule && activeDocIdForSend && shouldSaveActiveDoc) {
         try {
           _sendPerf.mark('doc_save_begin');
-          await documentModule.saveDocument();
+          const documentSaved = await documentModule.saveDocument({
+            silent: !!approvalForSend,
+          });
           _sendPerf.mark('doc_save_done');
+          if (approvalForSend && documentSaved === false) {
+            if (_userMsgEl && _userMsgEl.parentNode) _userMsgEl.remove();
+            if (
+              _pendingToolApproval
+              && _pendingToolApproval.approval_id === approvalForSend.approval_id
+            ) {
+              _pendingToolApproval = null;
+            }
+            uiModule.showError && uiModule.showError(
+              'Document could not be saved, so the action was not approved. Reload the chat to retry.'
+            );
+            updateSubmitButton('idle', submitBtn);
+            _releaseSendFlag();
+            return;
+          }
         } catch(e) {
           console.warn('doc auto-save failed', e);
           _sendPerf.mark('doc_save_failed');
+          if (approvalForSend) {
+            if (_userMsgEl && _userMsgEl.parentNode) _userMsgEl.remove();
+            if (
+              _pendingToolApproval
+              && _pendingToolApproval.approval_id === approvalForSend.approval_id
+            ) {
+              _pendingToolApproval = null;
+            }
+            uiModule.showError && uiModule.showError(
+              'Document could not be saved, so the action was not approved. Reload the chat to retry.'
+            );
+            updateSubmitButton('idle', submitBtn);
+            _releaseSendFlag();
+            return;
+          }
         }
       }
 
@@ -1789,23 +1834,30 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
-      if (_pendingToolApproval) {
-        fd.append('tool_approval_id', _pendingToolApproval.approval_id);
-        fd.append('tool_approval_decision', _pendingToolApproval.decision);
-        _pendingToolApproval = null;
+      if (approvalForSend) {
+        fd.append('tool_approval_id', approvalForSend.approval_id);
+        fd.append('tool_approval_decision', approvalForSend.decision);
+        if (
+          _pendingToolApproval
+          && _pendingToolApproval.approval_id === approvalForSend.approval_id
+        ) {
+          _pendingToolApproval = null;
+        }
       }
       if (selectedRouteForSend.model) fd.append('selected_model', selectedRouteForSend.model);
       if (selectedRouteForSend.endpoint_url) fd.append('selected_endpoint_url', selectedRouteForSend.endpoint_url);
       if (selectedRouteForSend.endpoint_id) fd.append('selected_endpoint_id', selectedRouteForSend.endpoint_id);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // Auto-save & send active doc ID so the backend sees latest content
-      if (documentModule && activeDocIdForSend) {
-        try {
-          _sendPerf.mark('doc_silent_save_begin');
-          await documentModule.saveDocument({ silent: true });
-          _sendPerf.mark('doc_silent_save_done');
-        } catch (_e) {
-          _sendPerf.mark('doc_silent_save_failed');
+      if (documentModule && activeDocIdForSend && shouldSaveActiveDoc) {
+        if (!approvalForSend) {
+          try {
+            _sendPerf.mark('doc_silent_save_begin');
+            await documentModule.saveDocument({ silent: true });
+            _sendPerf.mark('doc_silent_save_done');
+          } catch (_e) {
+            _sendPerf.mark('doc_silent_save_failed');
+          }
         }
         fd.append('active_doc_id', activeDocIdForSend);
       }
@@ -1859,7 +1911,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       if (isAgentMode) {
         fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
       }
-	      if (el('research-toggle').checked) {
+	      if (!approvalForSend && el('research-toggle').checked) {
 	        fd.append('use_research', 'true');
 	        // Research always runs in chat mode — override agent if set
 	        fd.set('mode', 'chat');

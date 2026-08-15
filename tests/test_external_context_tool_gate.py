@@ -499,6 +499,63 @@ def test_private_manager_write_aliases_keep_write_effect(tool_name, content):
     assert capabilities.result_integrity is ResultIntegrity.EXTERNAL_UNTRUSTED
 
 
+@pytest.mark.parametrize(
+    "tool_name,content",
+    [
+        ("manage_calendar", '{"action":"delete_event"}'),
+        ("manage_contact", '{"action":"delete"}'),
+        ("manage_documents", '{"action":"tidy"}'),
+        ("manage_endpoints", '{"action":"delete"}'),
+        ("manage_bg_jobs", '{"action":"kill","job_id":"job-1"}'),
+        ("manage_memory", "delete\nmemory-id"),
+        ("manage_mcp", '{"action":"delete"}'),
+        ("manage_notes", '{"action":"delete"}'),
+        ("manage_research", '{"action":"delete"}'),
+        ("manage_session", "truncate\nsession-id\n10"),
+        ("manage_settings", '{"action":"reset","key":"theme"}'),
+        ("manage_skills", '{"action":"delete"}'),
+        ("manage_tasks", '{"action":"delete"}'),
+        ("manage_tokens", '{"action":"delete"}'),
+        ("manage_webhooks", '{"action":"delete"}'),
+    ],
+)
+def test_multiplexed_destructive_actions_disclose_destructive_effect(
+    tool_name,
+    content,
+):
+    capabilities = capabilities_for_action(tool_name, content)
+
+    assert any(
+        effect in capabilities.effects
+        for effect in (
+            ToolEffect.WRITE_PRIVATE,
+            ToolEffect.ADMIN_CHANGE,
+            ToolEffect.EXECUTE_CODE,
+        )
+    )
+    assert ToolEffect.DESTRUCTIVE in capabilities.effects
+
+
+@pytest.mark.parametrize(
+    "tool_name,content",
+    [
+        ("manage_bg_jobs", '{"action":"output","job_id":"job-1"}'),
+        ("manage_endpoints", '{"action":"list"}'),
+        ("manage_mcp", '{"action":"reconnect"}'),
+        ("manage_settings", '{"action":"set","key":"theme","value":"dark"}'),
+        ("manage_tokens", '{"action":"create","name":"automation"}'),
+        ("manage_webhooks", '{"action":"disable"}'),
+    ],
+)
+def test_multiplexed_non_destructive_actions_do_not_claim_destructive_effect(
+    tool_name,
+    content,
+):
+    capabilities = capabilities_for_action(tool_name, content)
+
+    assert ToolEffect.DESTRUCTIVE not in capabilities.effects
+
+
 def test_ambiguous_private_manager_action_fails_high():
     capabilities = capabilities_for_action("manage_notes", "not json")
 
@@ -894,6 +951,100 @@ def test_tainted_native_route_keeps_action_schema_for_exact_approval(monkeypatch
     assert "update_document" in seen_tools
 
 
+def test_tainted_document_edit_without_active_target_cannot_be_approved(monkeypatch):
+    from src.prompt_security import untrusted_context_message
+
+    import src.agent_loop as agent_loop
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+
+    async def fake_stream(*args, **kwargs):
+        yield "data: " + json.dumps({
+            "delta": "```update_document\nreplacement\n```",
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def should_not_execute(*args, **kwargs):
+        raise AssertionError("unsealed document edit reached executor")
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", should_not_execute)
+    events = _collect_agent_events(
+        agent_loop.stream_agent_loop(
+            "http://local.test/v1",
+            "small-local-model",
+            [
+                {"role": "user", "content": "update a document"},
+                untrusted_context_message("stored context", "untrusted"),
+            ],
+            max_rounds=1,
+            relevant_tools={"update_document"},
+        )
+    )
+
+    blocked = [
+        event
+        for event in events
+        if event.get("type") == "tool_output"
+        and event.get("tool") == "update_document"
+    ]
+    assert blocked
+    assert "Open the exact document" in blocked[0]["output"]
+    assert "ask_user" not in blocked[0]
+
+
+def test_approval_pause_does_not_trigger_teacher_takeover(monkeypatch):
+    from src.prompt_security import untrusted_context_message
+
+    import src.agent_loop as agent_loop
+    import src.teacher_escalation as teacher_escalation
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+
+    async def fake_stream(*args, **kwargs):
+        yield "data: " + json.dumps({"delta": "```bash\nprintf paused\n```"}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def fail_teacher(*args, **kwargs):
+        raise AssertionError("approval pause reached teacher takeover")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(teacher_escalation, "run_teacher_inline", fail_teacher)
+    events = _collect_agent_events(
+        agent_loop.stream_agent_loop(
+            "http://local.test/v1",
+            "small-local-model",
+            [
+                {"role": "user", "content": "run it"},
+                untrusted_context_message("stored context", "untrusted"),
+            ],
+            session_id="session-1",
+            max_rounds=1,
+            relevant_tools={"bash"},
+        )
+    )
+
+    assert any(
+        event.get("ask_user", {}).get("kind") == "tool_approval"
+        for event in events
+    )
+
+
 def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
     root = Path(__file__).parents[1]
     chat = (root / "static/js/chat.js").read_text()
@@ -910,13 +1061,45 @@ def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
     assert "if (isStreaming || _sendInFlight)" in chat
     assert "_submitToolApprovalWhenIdle" in chat
     assert "input.dispatchEvent(new Event('input'" in chat
+    assert "_pendingToolApproval.draft = input.value" in chat
+    assert "const approvalForSend = _pendingToolApproval" in chat
+    assert "!approvalForSend && fileHandlerModule.getPendingCount()" in chat
+    assert "if (!approvalForSend) _pendingRegenAttachments = null" in chat
+    assert "!approvalForSend && el('research-toggle').checked" in chat
+    assert "approvalForSend ? (approvalForSend.draft || '') : ''" in chat
+    assert "if (approvalForSend && documentSaved === false)" in chat
+    assert "if (!approvalForSend) {\n          try {\n            _sendPerf.mark('doc_silent_save_begin')" in chat
+    assert "document_id: aq.action && aq.action.document_id" in renderer
     assert "const firstRound = (toolsByRound[0] || []).length ? 0 : 1" in renderer
     assert "const r = ev.round ?? 1" in renderer
     assert "/test-approval`" in skills
     assert "approval_id: approval.approval_id" in skills
     assert "['approve', 'Allow once'" in skills
-    assert index.count("app.js?v=20260815toolapproval3") == 2
+    assert index.count("app.js?v=20260815toolapproval4") == 2
     assert "app.js?v=20260808startupshell1" not in index
+    approval_module_sources = [
+        (root / path).read_text()
+        for path in (
+            "static/app.js",
+            "static/index.html",
+            "static/js/chat.js",
+            "static/js/chatRenderer.js",
+            "static/js/chatStream.js",
+            "static/js/document.js",
+            "static/js/emailInbox.js",
+            "static/js/emailLibrary.js",
+            "static/js/settings.js",
+            "static/js/slashCommands.js",
+        )
+    ]
+    assert all(
+        "20260722emailfastindex1" not in source
+        for source in approval_module_sources
+    )
+    assert all(
+        "20260815approvalsave1" in source
+        for source in approval_module_sources
+    )
 
 
 def test_frontend_raw_fences_do_not_call_document_mutators():
