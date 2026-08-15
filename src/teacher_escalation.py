@@ -439,56 +439,11 @@ async def escalate_and_learn(
     failure_reason: str,
     owner: Optional[str] = None,
 ) -> Optional[str]:
-    """Call the teacher, evaluate ITS attempt, save a skill on success.
-
-    Returns the saved skill name (or None if the teacher couldn't
-    write one). Logs but doesn't raise — escalation is best-effort.
-    """
-    from src.settings import get_setting
-    teacher_spec = (get_setting("teacher_model", "") or "").strip()
-    if not teacher_spec:
-        return None
-
-    prompt = _TEACHER_ESCALATION_PROMPT.format(
-        user_request=user_request or "(no user request captured)",
-        failure_reason=failure_reason or "(failure reason not captured)",
-        untrusted_trace_guard=_UNTRUSTED_TRACE_GUARD,
-        trace=_format_trace(tool_results, agent_reply),
+    """Retire legacy background learning when no approval UI is available."""
+    logger.info(
+        "background teacher learning skipped: generated skills require an "
+        "interactive exact approval"
     )
-    response = await _call_teacher(teacher_spec, prompt, owner=owner)
-    if not response:
-        return None
-
-    skill = _extract_skill_json(response)
-    if not skill:
-        # Teacher chose not to write a skill — see prompt contract.
-        logger.info("teacher declined to write a skill for this failure")
-        return None
-
-    # Same regex eval applied to the teacher's response — if the
-    # teacher itself sounded uncertain ("I don't have a tool"), drop
-    # the skill rather than persist a sketchy one.
-    status, reason = evaluate_turn_regex([], response)
-    if status == "failure":
-        logger.info(f"teacher response failed eval, skipping skill save: {reason}")
-        return None
-
-    # Tag the skill with the escalation source for auditability.
-    skill.setdefault("source", "teacher-escalation")
-    skill.setdefault("teacher_model", teacher_spec)
-    # Force action=add regardless of what the teacher wrote.
-    skill["action"] = "add"
-
-    import json
-    from src.tool_implementations import do_manage_skills
-    try:
-        result = await do_manage_skills(json.dumps(skill), owner=owner)
-        if isinstance(result, dict) and not result.get("error"):
-            logger.info(f"teacher wrote skill: {skill.get('name')}")
-            return skill.get("name")
-        logger.warning(f"skill save failed: {result}")
-    except Exception as e:
-        logger.warning(f"skill save raised: {e}")
     return None
 
 
@@ -761,31 +716,60 @@ async def run_teacher_inline(
     skill.setdefault("source", "teacher-escalation")
     skill.setdefault("teacher_model", teacher_spec)
 
-    import json as _json
-    from src.tool_implementations import do_manage_skills
-    try:
-        result = await do_manage_skills(_json.dumps(skill), owner=owner)
-        if isinstance(result, dict) and not result.get("error"):
-            logger.info(f"teacher succeeded; saved skill: {skill.get('name')}")
-            yield (
-                'data: ' + json.dumps({
-                    "type": "skill_saved",
-                    "name": skill.get("name"),
-                    "category": skill.get("category", "general"),
-                }) + '\n\n'
-            )
-        else:
-            yield (
-                'data: ' + json.dumps({
-                    "type": "skill_save_failed",
-                    "reason": str(result),
-                }) + '\n\n'
-            )
-    except Exception as e:
-        logger.warning(f"skill save raised: {e}")
+    if not session_id:
         yield (
             'data: ' + json.dumps({
                 "type": "skill_save_failed",
-                "reason": str(e),
+                "reason": (
+                    "Teacher-generated skills require an interactive exact "
+                    "approval before they can be saved."
+                ),
             }) + '\n\n'
         )
+        return
+
+    import json as _json
+    import uuid as _uuid
+    from src.tool_approvals import tool_approval_store
+    from src.tool_capabilities import capabilities_for_action
+
+    skill_content = _json.dumps(skill, ensure_ascii=False)
+    pending = tool_approval_store.create(
+        owner=owner,
+        session_id=session_id,
+        origin_run_id=f"teacher-skill-{_uuid.uuid4().hex}",
+        tool_name="manage_skills",
+        content=skill_content,
+        workspace=workspace,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("manage_skills", skill_content),
+    )
+    approval = pending.public_payload(
+        reason=(
+            "The teacher generated this reusable skill. Review and approve "
+            "the complete skill definition before it is saved."
+        ),
+    )
+    yield (
+        "data: "
+        + json.dumps({"delta": "Review the teacher-generated skill before saving it."})
+        + "\n\n"
+    )
+    yield (
+        "data: "
+        + json.dumps({
+            "type": "tool_output",
+            "tool": "manage_skills",
+            "command": str(skill.get("name") or "teacher-generated skill"),
+            "output": "Waiting for an exact user approval.",
+            "exit_code": None,
+            "ask_user": approval,
+            "teacher": True,
+        })
+        + "\n\n"
+    )
+    yield (
+        "data: "
+        + json.dumps({"type": "ask_user", "data": approval, "teacher": True})
+        + "\n\n"
+    )
