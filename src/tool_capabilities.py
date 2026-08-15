@@ -8,6 +8,7 @@ run-local integrity gates before dispatch.
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -79,9 +80,17 @@ _register(
         "list_models",
         "list_serve_presets",
         "list_served_models",
-        "search_hf_models",
     },
-    ToolEffect.READ_PUBLIC,
+    ToolEffect.READ_PRIVATE,
+    # These readers return provider-controlled model identifiers or durable
+    # user/admin-authored Cookbook and process state.  Local brokering does not
+    # make the returned text server-authored.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"search_hf_models"},
+    ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
     {"get_workspace", "glob", "grep", "ls", "read_file"},
@@ -205,21 +214,30 @@ _register(
 _register(
     {
         "adopt_served_model",
-        "api_call",
-        "app_api",
         "cancel_download",
         "download_model",
-        "manage_endpoints",
-        "manage_mcp",
-        "manage_settings",
-        "manage_tokens",
-        "manage_webhooks",
         "serve_model",
         "serve_preset",
         "stop_served_model",
         "vault_unlock",
     },
     ToolEffect.ADMIN_CHANGE,
+)
+_register(
+    {
+        "api_call",
+        "app_api",
+        "manage_endpoints",
+        "manage_mcp",
+        "manage_settings",
+        "manage_tokens",
+        "manage_webhooks",
+    },
+    ToolEffect.ADMIN_CHANGE,
+    # api_call/app_api return remote or stored application data, and the
+    # admin managers can echo user-controlled configuration.  Conservatively
+    # retain the action effect while treating every successful result as data.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 
 
@@ -432,6 +450,27 @@ def tool_result_is_successful(result: Any) -> bool:
     )
 
 
+def tool_result_should_arm_gate(
+    tool_name: Any,
+    result: Any,
+    content: Any = None,
+) -> bool:
+    """Return whether a result introduced non-system content to the model.
+
+    A content-free transport or validation failure does not change authority.
+    Producers set ``untrusted_content`` when a failed response still carries a
+    remote/private body, so HTTP status alone cannot launder that body.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get("blocked") or result.get("approval_required"):
+        return False
+    capabilities = capabilities_for_action(tool_name, content)
+    if capabilities.result_integrity is ResultIntegrity.SYSTEM:
+        return False
+    return tool_result_is_successful(result) or result.get("untrusted_content") is True
+
+
 POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
     {
         ToolEffect.READ_PRIVATE,
@@ -500,6 +539,7 @@ class ToolRunSecurityContext:
 
     external_untrusted_context_seen: bool = False
     external_sources: list[str] = field(default_factory=list)
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def observe_messages(self, messages: Iterable[dict]) -> None:
         """Promote any server-labelled untrusted prompt context into the gate."""
@@ -531,7 +571,7 @@ class ToolRunSecurityContext:
         result: Any,
         content: Any = None,
     ) -> None:
-        if not tool_result_is_successful(result):
+        if not tool_result_should_arm_gate(tool_name, result, content):
             return
         capabilities = capabilities_for_action(tool_name, content)
         if capabilities.result_integrity is not ResultIntegrity.SYSTEM:

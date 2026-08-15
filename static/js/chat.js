@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
+import chatRenderer from './chatRenderer.js?v=20260815toolapproval1';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -59,6 +59,23 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
   let _contextHeaderSeq = 0;
   let _contextHeaderData = null;
   let _contextHeaderBound = false;
+  let _pendingToolApproval = null;
+
+  document.addEventListener('odysseus:tool-approval', (event) => {
+    const detail = event && event.detail ? event.detail : {};
+    const decision = String(detail.decision || '').toLowerCase();
+    if (!detail.approval_id || !['approve', 'deny'].includes(decision)) return;
+    _pendingToolApproval = {
+      approval_id: String(detail.approval_id),
+      decision,
+    };
+    const input = document.getElementById('message');
+    if (input) {
+      input.value = detail.label || (decision === 'approve' ? 'Allow once' : 'Deny');
+    }
+    const sendButton = document.querySelector('.send-btn');
+    if (sendButton) sendButton.click();
+  });
 
   function _fmtContextNumber(n) {
     const v = Number(n || 0);
@@ -1756,6 +1773,11 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      if (_pendingToolApproval) {
+        fd.append('tool_approval_id', _pendingToolApproval.approval_id);
+        fd.append('tool_approval_decision', _pendingToolApproval.decision);
+        _pendingToolApproval = null;
+      }
       if (selectedRouteForSend.model) fd.append('selected_model', selectedRouteForSend.model);
       if (selectedRouteForSend.endpoint_url) fd.append('selected_endpoint_url', selectedRouteForSend.endpoint_url);
       if (selectedRouteForSend.endpoint_id) fd.append('selected_endpoint_id', selectedRouteForSend.endpoint_id);

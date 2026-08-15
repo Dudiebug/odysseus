@@ -80,6 +80,27 @@ def _most_recent_owned_document(db, Document, owner: Optional[str], active_only:
     return q.order_by(Document.updated_at.desc()).first()
 
 
+def _approved_document_version_error(doc: Any, ctx: dict) -> Optional[Dict]:
+    """Reject a sealed document action when its target changed meanwhile."""
+    expected = ctx.get("expected_document_version")
+    if expected is None:
+        return None
+    try:
+        unchanged = int(getattr(doc, "version_count", -1)) == int(expected)
+    except (TypeError, ValueError):
+        unchanged = False
+    if unchanged:
+        return None
+    return {
+        "error": (
+            "The target document changed after this action was proposed. "
+            "Review the latest version and request the edit again."
+        ),
+        "exit_code": 1,
+        "document_changed": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Document tools — create/update/edit/suggest living documents
 # ---------------------------------------------------------------------------
@@ -463,6 +484,10 @@ class UpdateDocumentTool:
             if not doc:
                 return {"error": "No documents exist to update"}
 
+            version_error = _approved_document_version_error(doc, ctx)
+            if version_error:
+                return version_error
+
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
             new_content = _coerce_email_document_content(doc.current_content or "", content) if is_email_doc else content.strip()
             if is_email_doc:
@@ -540,6 +565,10 @@ class EditDocumentTool:
                     logger.info(f"edit_document: fell back to most recent doc id={target_id} title={doc.title!r}")
             if not doc:
                 return {"error": "No documents exist to edit"}
+
+            version_error = _approved_document_version_error(doc, ctx)
+            if version_error:
+                return version_error
 
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
             blank_find_edits = [e for e in edits if not (e.get("find") or "").strip()]
@@ -676,6 +705,10 @@ class SuggestDocumentTool:
             doc = _get_owned_document(db, Document, target_id, owner)
             if not doc:
                 return {"error": f"Document {target_id} not found"}
+
+            version_error = _approved_document_version_error(doc, ctx)
+            if version_error:
+                return version_error
 
             # Validate that FIND text exists in document
             valid = []

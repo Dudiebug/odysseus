@@ -154,6 +154,11 @@ def _chat_stream_endpoint(
             "primary": (endpoint_url, model, kwargs.get("headers")),
             "fallbacks": kwargs.get("fallbacks"),
         }
+        if kwargs.get("exact_approval") is not None:
+            captured["exact_approval"] = kwargs["exact_approval"]
+            captured["approval_disabled_tools"] = set(
+                kwargs.get("disabled_tools") or ()
+            )
         if agent_chunks is not None:
             for chunk in agent_chunks:
                 if isinstance(chunk, BaseException):
@@ -250,6 +255,85 @@ async def test_chat_stream_route_keeps_selected_model_strict_with_legacy_data(mo
         assert captured == {"chat": [selected]}
     else:
         assert captured == {"agent": {"primary": selected, "fallbacks": []}}
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_consumes_exact_tool_approval_for_own_session(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    tool_content = '{"content":"replacement"}'
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice",
+        session_id="session-1",
+        origin_run_id="run-1",
+        tool_name="update_document",
+        content=tool_content,
+        workspace=None,
+        document_id="document-7",
+        document_version=4,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("update_document", tool_content),
+    )
+    request = _RouteRequest("agent")
+    request._form.update(
+        {
+            "tool_approval_id": pending.approval_id,
+            "tool_approval_decision": "approve",
+            "active_doc_id": "document-changed-in-browser",
+            "compare_mode": "false",
+        }
+    )
+
+    response = await endpoint(request)
+    async for _ in response.body_iterator:
+        pass
+
+    grant = captured["exact_approval"]
+    assert grant.pending == pending
+    assert chat_routes.tool_approval_store.peek(pending.approval_id) is None
+    assert grant.matches(
+        owner="alice",
+        session_id="session-1",
+        tool_name="update_document",
+        content=tool_content,
+        workspace=None,
+    )
+    assert "update_document" not in captured["approval_disabled_tools"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_approval_restores_exact_shell_turn_toggle(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice",
+        session_id="session-1",
+        origin_run_id="run-1",
+        tool_name="bash",
+        content="printf exact",
+        workspace=None,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("bash", "printf exact"),
+    )
+    request = _RouteRequest("chat")
+    request._form.update(
+        {
+            "allow_bash": "false",
+            "tool_approval_id": pending.approval_id,
+            "tool_approval_decision": "approve",
+        }
+    )
+
+    response = await endpoint(request)
+    async for _ in response.body_iterator:
+        pass
+
+    assert captured["exact_approval"].pending == pending
+    assert "bash" not in captured["approval_disabled_tools"]
 
 
 @pytest.mark.asyncio
@@ -2176,7 +2260,10 @@ def test_late_agent_fallback_records_each_round_and_stays_pinned(monkeypatch):
         yield "data: [DONE]\n\n"
 
     async def fake_execute(block, *args, **kwargs):
-        return "bash", {"output": "ok", "exit_code": 0}
+        # Keep this routing-only test untainted. Successful shell output is
+        # intentionally workspace-untrusted and would end the next action at
+        # the exact-approval boundary this test is not exercising.
+        return "bash", {"error": "fixture failure", "exit_code": 1}
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
@@ -2878,7 +2965,9 @@ def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
         yield "data: [DONE]\n\n"
 
     async def fake_execute(block, *args, **kwargs):
-        return "bash", {"output": "same result", "exit_code": 0}
+        # The repeated-call recovery is the subject here, not provenance. A
+        # successful shell result correctly arms the exact-approval gate.
+        return "bash", {"error": "same fixture failure", "exit_code": 1}
 
     async def fake_synthesis(**kwargs):
         synthesis_calls.append(kwargs)

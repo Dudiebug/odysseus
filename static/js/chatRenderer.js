@@ -2342,6 +2342,7 @@ export function renderAskUserCard(payload, options) {
   card.setAttribute('role', 'group');
   card.tabIndex = -1;
   const multi = !!aq.multi;
+  const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
   const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
 
   const head = document.createElement('div');
@@ -2365,6 +2366,27 @@ export function renderAskUserCard(payload, options) {
   question.innerHTML = emojiText(aq.question);
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
+
+  if (isToolApproval && aq.action) {
+    const action = document.createElement('div');
+    action.className = 'ask-user-option-desc';
+    const effects = Array.isArray(aq.action.effects)
+      ? aq.action.effects.join(', ')
+      : '';
+    action.textContent = [
+      aq.action.tool || 'tool',
+      aq.action.content || '',
+      effects ? `Effects: ${effects}` : '',
+      aq.action.workspace ? `Workspace: ${aq.action.workspace}` : '',
+      aq.action.document_id ? `Document: ${aq.action.document_id}` : '',
+      aq.action.document_version != null
+        ? `Document version: ${aq.action.document_version}`
+        : '',
+      aq.action.digest ? `Approval fingerprint: ${aq.action.digest}` : '',
+    ].filter(Boolean).join('\n');
+    action.style.whiteSpace = 'pre-wrap';
+    card.appendChild(action);
+  }
 
   const list = document.createElement('div');
   list.className = 'ask-user-options';
@@ -2403,7 +2425,20 @@ export function renderAskUserCard(payload, options) {
     }
     if (!multi) {
       row.type = 'button';
-      row.addEventListener('click', () => send(label));
+      row.addEventListener('click', () => {
+        if (isToolApproval) {
+          card.remove();
+          document.dispatchEvent(new CustomEvent('odysseus:tool-approval', {
+            detail: {
+              approval_id: aq.approval_id,
+              decision: String((opt && opt.value) || '').toLowerCase(),
+              label,
+            },
+          }));
+        } else {
+          send(label);
+        }
+      });
     }
     list.appendChild(row);
   });
@@ -2439,7 +2474,7 @@ export function renderAskUserCard(payload, options) {
   });
   other.appendChild(otherInput);
   other.appendChild(otherSend);
-  card.appendChild(other);
+  if (!isToolApproval) card.appendChild(other);
 
   chatBox.appendChild(card);
   if (renderOptions.scroll !== false) {

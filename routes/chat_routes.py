@@ -67,6 +67,7 @@ from src.tool_policy import (
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
 )
+from src.tool_approvals import tool_approval_store
 
 logger = logging.getLogger(__name__)
 
@@ -905,6 +906,15 @@ def setup_chat_routes(
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        tool_approval_id = (
+            form_data.get("tool_approval_id")
+            or (body or {}).get("tool_approval_id")
+        )
+        tool_approval_decision = (
+            form_data.get("tool_approval_decision")
+            or (body or {}).get("tool_approval_decision")
+        )
+        exact_tool_approval = None
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -1051,6 +1061,64 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            if tool_approval_id:
+                pending_approval = tool_approval_store.peek(tool_approval_id)
+                normalized_owner = str(owner or "").strip().casefold()
+                if (
+                    pending_approval is None
+                    or pending_approval.owner != normalized_owner
+                    or pending_approval.session_id != str(session)
+                ):
+                    raise HTTPException(
+                        409,
+                        "This tool approval is invalid, expired, or belongs to another thread.",
+                    )
+                decision = str(tool_approval_decision or "").strip().lower()
+                if decision not in {"approve", "deny"}:
+                    raise HTTPException(400, "Invalid tool approval decision.")
+                if plan_mode:
+                    raise HTTPException(
+                        409,
+                        "Tool approvals cannot be consumed while plan mode is active.",
+                    )
+                exact_tool_approval = tool_approval_store.consume(
+                    tool_approval_id,
+                    decision=decision,
+                    owner=owner,
+                    session_id=session,
+                )
+                if decision == "approve" and exact_tool_approval is None:
+                    raise HTTPException(
+                        409,
+                        "This tool approval could not be consumed.",
+                    )
+                if decision == "approve":
+                    message = (
+                        f"Approved the exact {pending_approval.tool_name} action "
+                        "shown above once."
+                    )
+                    # The sealed server record, not mutable composer state,
+                    # restores the original action workspace.
+                    workspace = pending_approval.workspace or None
+                    workspace_rejected = None
+                    if pending_approval.document_id:
+                        active_doc_id = pending_approval.document_id
+                    # The approval click is the per-turn opt-in for this exact
+                    # sealed action. Restore only the coarse request toggle
+                    # that would otherwise disable it because the synthetic
+                    # "Approved…" message no longer resembles the original
+                    # shell/web request. Current privilege, global-disable,
+                    # incognito, compare, and tool-policy gates still run.
+                    if pending_approval.tool_name == "bash":
+                        allow_bash = "true"
+                    if pending_approval.tool_name in WEB_TOOL_NAMES:
+                        allow_web_search = "true"
+                        _search_enabled = True
+                else:
+                    message = (
+                        f"Denied the {pending_approval.tool_name} action shown above."
+                    )
+                chat_mode = "agent"
             _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
@@ -2135,6 +2203,7 @@ def setup_chat_routes(
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
                         defer_context_shaping=_foreground_policy.enabled,
+                        exact_approval=exact_tool_approval,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

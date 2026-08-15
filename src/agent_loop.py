@@ -41,7 +41,9 @@ from src.tool_capabilities import (
     capabilities_for_tool,
     messages_contain_external_untrusted_context,
     tool_result_is_successful,
+    tool_result_should_arm_gate,
 )
+from src.tool_approvals import ExactToolApproval, tool_approval_store
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
     parse_tool_blocks,
@@ -3058,7 +3060,11 @@ def _append_tool_results(
                 result_message["metadata"] = {
                     "trusted": False,
                     "source": f"tool result: {tool_name}",
-                    "tool_gate_untrusted": tool_result_is_successful(result),
+                    "tool_gate_untrusted": tool_result_should_arm_gate(
+                        tool_name,
+                        result,
+                        tool_content,
+                    ),
                 }
             messages.append(result_message)
     else:
@@ -3074,11 +3080,11 @@ def _append_tool_results(
         # web/RAG context. THREAT_MODEL.md lists tool output as a surface that
         # must go through untrusted_context_message.
         arm_tool_gate = any(
-            tool_result_is_successful(record.get("result"))
-            and capabilities_for_action(
+            tool_result_should_arm_gate(
                 record.get("tool_name"),
+                record.get("result"),
                 record.get("content"),
-            ).result_integrity is not ResultIntegrity.SYSTEM
+            )
             for record in tool_result_records
         )
         messages.append(
@@ -3418,6 +3424,7 @@ async def stream_agent_loop(
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
     external_untrusted_context_seen: bool = False,
+    exact_approval: Optional[ExactToolApproval] = None,
     _is_teacher_run: bool = False,
     history_session=None,
     defer_context_shaping: bool = False,
@@ -3436,6 +3443,10 @@ async def stream_agent_loop(
     run_security = ToolRunSecurityContext(
         external_untrusted_context_seen=(
             bool(external_untrusted_context_seen)
+            or bool(
+                exact_approval
+                and exact_approval.pending.external_untrusted_context_seen
+            )
             or messages_contain_external_untrusted_context(messages)
         )
     )
@@ -4435,15 +4446,11 @@ async def stream_agent_loop(
     _exhausted_rounds = False
 
     def _filter_route_tool_schemas(schemas):
-        if not run_security.external_untrusted_context_seen or not schemas:
-            return schemas
-        return [
-            schema
-            for schema in schemas
-            if run_security.decision_for(
-                (schema.get("function") or {}).get("name") or schema.get("name")
-            ).allowed
-        ]
+        # Keep candidate actions visible after taint so the model can propose
+        # the exact call that the server will seal for user approval.  Schema
+        # visibility is not authority: both the loop and dispatcher still gate
+        # execution, and only a one-use server record can cross that boundary.
+        return schemas
 
     def _tool_schemas_for_route(route_state):
         route_mcp_schemas = route_state["mcp_schemas"]
@@ -4484,6 +4491,254 @@ async def stream_agent_loop(
         schemas = route_mcp_schemas if wants_mcp and route_mcp_schemas else []
         return _filter_route_tool_schemas(schemas)
 
+    _approved_result_injected = False
+    if exact_approval is not None:
+        approved = exact_approval.pending
+        approved_block = ToolBlock(approved.tool_name, approved.content)
+        approved_display = approved.content.strip()
+        approval_matches = exact_approval.matches(
+            owner=owner,
+            session_id=session_id,
+            tool_name=approved.tool_name,
+            content=approved.content,
+            workspace=workspace,
+        )
+        if approval_matches:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "tool_start",
+                        "tool": approved.tool_name,
+                        "command": approved_display[:240],
+                        "full_command": approved_display,
+                        "round": 0,
+                        "approved": True,
+                    }
+                )
+                + "\n\n"
+            )
+        approved_progress_q: asyncio.Queue = asyncio.Queue()
+
+        async def _push_approved_progress(payload):
+            await approved_progress_q.put(payload)
+
+        async def _run_approved_tool():
+            try:
+                return await execute_tool_block(
+                    approved_block,
+                    session_id=session_id,
+                    disabled_tools=disabled_tools,
+                    tool_policy=tool_policy,
+                    owner=owner,
+                    progress_cb=_push_approved_progress,
+                    workspace=workspace,
+                    security_context=run_security,
+                    exact_approval=exact_approval,
+                )
+            finally:
+                await approved_progress_q.put(None)
+
+        approved_tool_task = asyncio.create_task(_run_approved_tool())
+        try:
+            while True:
+                progress_event = await approved_progress_q.get()
+                if progress_event is None:
+                    break
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "tool_progress",
+                            "tool": approved.tool_name,
+                            "round": 0,
+                            "approved": True,
+                            **progress_event,
+                        }
+                    )
+                    + "\n\n"
+                )
+            desc, approved_result = await approved_tool_task
+        finally:
+            if not approved_tool_task.done():
+                approved_tool_task.cancel()
+                try:
+                    await approved_tool_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        total_tool_calls += 1
+
+        if tool_result_is_successful(approved_result):
+            for doc_event in _document_stream_events(approved_block):
+                yield f"data: {json.dumps(doc_event)}\n\n"
+        if approved_result.get("action") == "suggest":
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "doc_suggestions",
+                        "doc_id": approved_result.get("doc_id"),
+                        "suggestions": approved_result.get("suggestions", []),
+                    }
+                )
+                + "\n\n"
+            )
+        elif approved_result.get("doc_id") and approved_result.get("content") is not None:
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "doc_update",
+                        "doc_id": approved_result["doc_id"],
+                        "title": approved_result.get("title", ""),
+                        "language": approved_result.get("language", ""),
+                        "content": approved_result.get("content", ""),
+                        "version": approved_result.get("version", 1),
+                    }
+                )
+                + "\n\n"
+            )
+        if approved_result.get("ui_event"):
+            yield (
+                "data: "
+                + json.dumps({"type": "ui_control", "data": approved_result})
+                + "\n\n"
+            )
+
+        approved_output = str(
+            approved_result.get("output")
+            or approved_result.get("stdout")
+            or approved_result.get("response")
+            or approved_result.get("results")
+            or approved_result.get("content")
+            or approved_result.get("error")
+            or "(no output)"
+        )
+        approved_event = {
+            "type": "tool_output",
+            "tool": approved.tool_name,
+            "command": approved_display[:240] if approval_matches else "",
+            "output": _truncate(approved_output),
+            "exit_code": approved_result.get("exit_code"),
+            "approved": True,
+        }
+        for key in (
+            "image_url",
+            "image_id",
+            "image_prompt",
+            "image_model",
+            "image_size",
+            "image_quality",
+            "doc_id",
+            "title",
+            "language",
+            "content",
+            "version",
+            "action",
+            "ui_event",
+            "diff",
+        ):
+            if key in approved_result:
+                approved_event[key] = approved_result[key]
+        if approved_result.get("images"):
+            approved_image = approved_result["images"][0]
+            approved_event["screenshot"] = (
+                f"data:{approved_image['mimeType']};base64,{approved_image['data']}"
+            )
+        yield "data: " + json.dumps(approved_event) + "\n\n"
+        if approved_result.get("image_url"):
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "generated_image",
+                        "url": approved_result["image_url"],
+                        **{
+                            key: approved_result[key]
+                            for key in (
+                                "image_url",
+                                "image_id",
+                                "image_prompt",
+                                "image_model",
+                                "image_size",
+                                "image_quality",
+                            )
+                            if key in approved_result
+                        },
+                    }
+                )
+                + "\n\n"
+            )
+
+        approved_research_id = approved_result.get("research_session_id")
+        if approved_research_id:
+            approved_anchor = (
+                f"\n\n[Open in Deep Research](#research-{approved_research_id})\n"
+            )
+            full_response += approved_anchor
+            yield "data: " + json.dumps({"delta": approved_anchor}) + "\n\n"
+        approved_note_id = approved_result.get("note_id")
+        if approved_note_id and approved.tool_name == "manage_notes":
+            approved_note_title = str(
+                approved_result.get("note_title") or ""
+            ).strip()
+            approved_note_label = (
+                f"View note: {approved_note_title}"
+                if approved_note_title
+                else "View note"
+            )
+            approved_anchor = (
+                f"\n\n[{approved_note_label}](#note-{approved_note_id})\n"
+            )
+            full_response += approved_anchor
+            yield "data: " + json.dumps({"delta": approved_anchor}) + "\n\n"
+
+        approved_tool_event = {
+            "round": 0,
+            "tool": approved.tool_name,
+            "desc": desc,
+            "command": approved_display[:240] if approval_matches else "",
+            "output": _truncate(approved_output),
+            "exit_code": approved_result.get("exit_code"),
+            "approved": True,
+            "approval_digest": approved.digest[:16],
+        }
+        for key in (
+            "image_url",
+            "image_prompt",
+            "image_model",
+            "image_size",
+            "image_quality",
+            "diff",
+        ):
+            if approved_result.get(key):
+                approved_tool_event[key] = approved_result[key]
+        if approved_result.get("doc_id"):
+            approved_tool_event["doc_id"] = approved_result["doc_id"]
+            approved_tool_event["doc_title"] = approved_result.get("title", "")
+        tool_events.append(approved_tool_event)
+        if approved.tool_name in _VERIFIER_EFFECTFUL_TOOLS:
+            _effectful_used = True
+        formatted_approved_result = format_tool_result(desc, approved_result)
+        _append_tool_results(
+            messages,
+            "",
+            [],
+            [formatted_approved_result],
+            [formatted_approved_result],
+            False,
+            0,
+            tool_result_records=[
+                {
+                    "tool_name": approved.tool_name,
+                    "content": approved.content,
+                    "result": approved_result,
+                    "text": formatted_approved_result,
+                }
+            ],
+        )
+        _approved_result_injected = True
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -4504,7 +4759,7 @@ async def stream_agent_loop(
                 _route_state.get("compaction_state", {}) if round_num == 1 else {}
             ),
         }
-        if round_num == 1:
+        if round_num == 1 and not _approved_result_injected:
             _active_route_state["request_messages"] = _initial_route_request_messages
         all_tool_schemas = _tool_schemas_for_route(_active_route_state)
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
@@ -5368,12 +5623,44 @@ async def stream_agent_loop(
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
             if not security_decision.allowed:
-                desc, result = blocked_tool_result(
-                    block.tool_type,
-                    security_decision.reason or "Tool blocked by external-context policy.",
+                approval_document = (
+                    active_document
+                    if block.tool_type
+                    in {"edit_document", "suggest_document", "update_document"}
+                    else None
                 )
+                pending_approval = tool_approval_store.create(
+                    owner=owner,
+                    session_id=session_id,
+                    origin_run_id=run_security.run_id,
+                    tool_name=block.tool_type,
+                    content=block.content,
+                    workspace=workspace,
+                    document_id=getattr(approval_document, "id", None),
+                    document_version=getattr(
+                        approval_document,
+                        "version_count",
+                        None,
+                    ),
+                    external_untrusted_context_seen=(
+                        run_security.external_untrusted_context_seen
+                    ),
+                    capabilities=capabilities_for_action(
+                        block.tool_type,
+                        block.content,
+                    ),
+                )
+                desc = f"{block.tool_type}: APPROVAL REQUIRED"
+                result = {
+                    "output": "Waiting for an exact user approval.",
+                    "exit_code": None,
+                    "approval_required": True,
+                    "ask_user": pending_approval.public_payload(
+                        reason=security_decision.reason,
+                    ),
+                }
                 logger.info(
-                    "Tool blocked before start by external-context policy: %s",
+                    "Exact approval required before tool start: %s",
                     block.tool_type,
                 )
             elif tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
@@ -5857,6 +6144,10 @@ async def stream_agent_loop(
                 and not result.get("error")
             ):
                 _ody_doc_tool_completed = True
+            if _pending_ask_user_event:
+                # An approval card is a turn boundary.  Never execute a later
+                # model-supplied call from the same batch after this request.
+                break
 
         # If budget was hit, stop the loop
         if budget_hit:
