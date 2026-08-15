@@ -2260,10 +2260,10 @@ def test_late_agent_fallback_records_each_round_and_stays_pinned(monkeypatch):
         yield "data: [DONE]\n\n"
 
     async def fake_execute(block, *args, **kwargs):
-        # Keep this routing-only test untainted. Successful shell output is
-        # intentionally workspace-untrusted and would end the next action at
-        # the exact-approval boundary this test is not exercising.
-        return "bash", {"error": "fixture failure", "exit_code": 1}
+        # Keep this routing-only test untainted with a content-free fixture.
+        # Any model-visible shell error is workspace-derived and correctly
+        # reaches the exact-approval boundary on the next action.
+        return "bash", {"exit_code": 1}
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
@@ -2965,9 +2965,10 @@ def test_force_answer_recovery_persists_and_bills_pinned_fallback_route(
         yield "data: [DONE]\n\n"
 
     async def fake_execute(block, *args, **kwargs):
-        # The repeated-call recovery is the subject here, not provenance. A
-        # successful shell result correctly arms the exact-approval gate.
-        return "bash", {"error": "same fixture failure", "exit_code": 1}
+        # The repeated-call recovery is the subject here, not provenance. Use
+        # a content-free failure; model-visible shell errors correctly arm the
+        # exact-approval gate.
+        return "bash", {"exit_code": 1}
 
     async def fake_synthesis(**kwargs):
         synthesis_calls.append(kwargs)

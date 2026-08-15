@@ -104,6 +104,15 @@ def test_new_session_approval_supersedes_prior_pending_action():
     assert store.peek(second.approval_id) == second
 
 
+def test_independent_headless_runs_do_not_supersede_each_other():
+    store = ToolApprovalStore()
+    first = _pending(store, session_id=None, origin_run_id="headless-1")
+    second = _pending(store, session_id=None, origin_run_id="headless-2")
+
+    assert store.peek(first.approval_id) == first
+    assert store.peek(second.approval_id) == second
+
+
 def test_public_payload_shows_complete_action_but_not_authority_fields():
     store = ToolApprovalStore()
     pending = _pending(

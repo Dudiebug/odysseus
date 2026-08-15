@@ -73,13 +73,19 @@ async def _drain_agent(sess, messages):
             round_num = d.get("round", round_num)
         elif d.get("type") == "tool_output":
             # Mirror the live chat's tool_event shape (chat_routes / chatRenderer).
-            tool_events.append({
+            tool_event = {
                 "round": round_num,
                 "tool": d.get("tool"),
                 "command": d.get("command"),
                 "output": d.get("output"),
                 "exit_code": d.get("exit_code"),
-            })
+            }
+            if isinstance(d.get("ask_user"), dict):
+                # Preserve exact-approval cards from a tainted background-job
+                # continuation so the user can authorize the sealed action on
+                # the next foreground turn instead of losing it headlessly.
+                tool_event["ask_user"] = d["ask_user"]
+            tool_events.append(tool_event)
     return full, tool_events
 
 

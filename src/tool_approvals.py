@@ -285,15 +285,20 @@ class ToolApprovalStore:
         )
         with self._lock:
             self._purge_expired_locked(now)
-            # The UI exposes one pending card per chat. Supersede any older
-            # action for the same owner/session so stale history cannot retain
-            # parallel grants and the in-memory registry stays bounded.
+            # The chat UI exposes one pending card per session, so supersede an
+            # older action there. Headless/manual-test callers use an empty
+            # session id; keep independent origin runs separate so two skill
+            # tests owned by the same user cannot invalidate each other.
             superseded = [
                 approval_id
                 for approval_id, existing in self._pending.items()
                 if (
                     existing.owner == pending.owner
                     and existing.session_id == pending.session_id
+                    and (
+                        bool(pending.session_id)
+                        or existing.origin_run_id == pending.origin_run_id
+                    )
                 )
             ]
             for approval_id in superseded:

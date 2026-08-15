@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -47,3 +48,40 @@ def test_background_job_output_is_wrapped_and_arms_gate(monkeypatch):
     assert message["metadata"]["trusted"] is False
     assert message["metadata"]["tool_gate_untrusted"] is True
     assert "injected output" in message["content"]
+
+
+def test_background_drain_preserves_exact_approval_card(monkeypatch):
+    approval = {
+        "kind": "tool_approval",
+        "approval_id": "opaque-id",
+        "question": "Allow this exact action once?",
+        "options": [{"label": "Allow once"}, {"label": "Deny"}],
+    }
+
+    async def fake_stream_agent_loop(*args, **kwargs):
+        yield "data: " + json.dumps({
+            "type": "tool_output",
+            "tool": "bash",
+            "command": "echo ok",
+            "output": "Waiting for an exact user approval.",
+            "exit_code": None,
+            "ask_user": approval,
+        })
+        yield "data: [DONE]"
+
+    agent_loop = types.ModuleType("src.agent_loop")
+    agent_loop.stream_agent_loop = fake_stream_agent_loop
+    monkeypatch.setitem(sys.modules, "src.agent_loop", agent_loop)
+
+    sess = SimpleNamespace(
+        endpoint_url="http://example.test",
+        model="model",
+        headers=None,
+        context_length=0,
+        id="s1",
+        owner="owner",
+    )
+
+    _, events = asyncio.run(bg_monitor._drain_agent(sess, []))
+
+    assert events[0]["ask_user"] == approval

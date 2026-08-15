@@ -457,9 +457,11 @@ def tool_result_should_arm_gate(
 ) -> bool:
     """Return whether a result introduced non-system content to the model.
 
-    A content-free transport or validation failure does not change authority.
-    Producers set ``untrusted_content`` when a failed response still carries a
-    remote/private body, so HTTP status alone cannot launder that body.
+    A blocked/approval placeholder and a genuinely content-free failure do not
+    change authority. Once a non-system tool returns text or structured data
+    that will be folded into model context, however, failure status cannot make
+    that payload trusted: MCP ``isError`` text, provider exception messages,
+    and HTTP error bodies are all attacker-controlled input surfaces.
     """
     if not isinstance(result, dict):
         return False
@@ -468,7 +470,18 @@ def tool_result_should_arm_gate(
     capabilities = capabilities_for_action(tool_name, content)
     if capabilities.result_integrity is ResultIntegrity.SYSTEM:
         return False
-    return tool_result_is_successful(result) or result.get("untrusted_content") is True
+    if tool_result_is_successful(result) or result.get("untrusted_content") is True:
+        return True
+    model_visible_keys = (
+        "stderr",
+        "stdout",
+        "output",
+        "content",
+        "response",
+        "results",
+        "images",
+    )
+    return any(result.get(key) not in (None, "", [], {}, ()) for key in model_visible_keys)
 
 
 POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(

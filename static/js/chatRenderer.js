@@ -2524,7 +2524,7 @@ export function addMessage(role, content, modelName, metadata) {
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
-        const r = ev.round || 1;
+        const r = ev.round ?? 1;
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
       }
