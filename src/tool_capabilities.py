@@ -528,17 +528,25 @@ def tool_result_should_arm_gate(
         return False
     if tool_result_is_successful(result):
         return True
-    model_visible_keys = (
-        "error",
-        "stderr",
-        "stdout",
-        "output",
-        "content",
-        "response",
-        "results",
-        "images",
+    # ``format_tool_result`` serializes every additional structured field, so
+    # a fixed allowlist here would inevitably miss model-visible payloads such
+    # as ``details``, ``events``, or provider-specific response keys. Exclude
+    # only status/policy controls that carry no producer content; any other
+    # non-empty field crosses the same integrity boundary even on failure.
+    non_content_keys = frozenset(
+        {
+            "approval_required",
+            "blocked",
+            "exit_code",
+            "policy",
+            "success",
+            "untrusted_content",
+        }
     )
-    return any(result.get(key) not in (None, "", [], {}, ()) for key in model_visible_keys)
+    return any(
+        key not in non_content_keys and value not in (None, "", [], {}, ())
+        for key, value in result.items()
+    )
 
 
 POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(

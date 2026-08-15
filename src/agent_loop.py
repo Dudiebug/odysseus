@@ -31,7 +31,11 @@ from src.context_compactor import (
 )
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
-from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_security import (
+    blocked_tools_for_owner,
+    email_tool_policy_names,
+    plan_mode_disabled_tools,
+)
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_capabilities import (
     ResultIntegrity,
@@ -5630,7 +5634,40 @@ async def stream_agent_loop(
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
-            if not security_decision.allowed:
+            policy_names = email_tool_policy_names(block.tool_type)
+            blocked_by_tool_policy = bool(
+                tool_policy
+                and any(tool_policy.blocks(name) for name in policy_names)
+            )
+            blocked_by_disabled_tools = bool(
+                disabled_tools and not policy_names.isdisjoint(disabled_tools)
+            )
+            if (
+                (blocked_by_tool_policy or blocked_by_disabled_tools)
+                and not _ody_clamped_tool_allowed
+            ):
+                if blocked_by_tool_policy:
+                    blocked_name = next(
+                        name for name in policy_names if tool_policy.blocks(name)
+                    )
+                    reason = tool_policy.reason_for(blocked_name)
+                else:
+                    reason = (
+                        f"Tool '{block.tool_type}' is disabled by the current "
+                        "request policy."
+                    )
+                desc = f"{block.tool_type}: BLOCKED"
+                result = {
+                    "error": reason,
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "current_tool_policy",
+                }
+                logger.info(
+                    "Tool blocked before approval by current policy: %s",
+                    block.tool_type,
+                )
+            elif not security_decision.allowed:
                 approval_document = (
                     active_document
                     if block.tool_type
@@ -5706,14 +5743,6 @@ async def stream_agent_loop(
                         "Exact approval required before tool start: %s",
                         block.tool_type,
                     )
-            elif tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
-                desc = f"{block.tool_type}: BLOCKED"
-                result = {
-                    "error": tool_policy.reason_for(block.tool_type),
-                    "exit_code": 1,
-                    "blocked": True,
-                }
-                logger.info("Tool blocked before start by policy: %s", block.tool_type)
             else:
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'

@@ -223,6 +223,21 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     async def fake_stream_agent_loop(*args, **kwargs):
         yield "data: {\"type\": \"tool_output\", \"tool\": \"bash\"}\n\n"
         yield "data: {\"type\": \"text\", \"delta\": \"Teacher reply\"}\n\n"
+        yield "data: " + json.dumps({
+            "type": "metrics",
+            "data": {
+                "model": "teacher-model",
+                "round_texts": ["Teacher reply"],
+                "tool_events": [
+                    {
+                        "round": 1,
+                        "tool": "bash",
+                        "output": "done",
+                        "exit_code": 0,
+                    },
+                ],
+            },
+        }) + "\n\n"
         yield "data: [DONE]\n\n"
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_stream_agent_loop)
 
@@ -262,6 +277,14 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
         and "\"type\": \"tool_output\"" in evt
     )
     approval = approval_event["ask_user"]
+    final_metrics = next(
+        json.loads(evt[6:])
+        for evt in reversed(events)
+        if evt.startswith("data: ") and '"type": "metrics"' in evt
+    )
+    persisted_approval = final_metrics["data"]["tool_events"][-1]
+    assert persisted_approval["ask_user"] == approval
+    assert persisted_approval["round"] == 2
     pending = tool_approval_store.peek(approval["approval_id"])
     assert pending is not None
     assert pending.tool_name == "manage_skills"

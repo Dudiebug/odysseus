@@ -915,6 +915,7 @@ def setup_chat_routes(
             or (body or {}).get("tool_approval_decision")
         )
         exact_tool_approval = None
+        pending_tool_approval = None
         tool_approval_continuation = False
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
@@ -1063,12 +1064,12 @@ def setup_chat_routes(
             sess = session_manager.get_session(session)
             owner = effective_user(request)
             if tool_approval_id:
-                pending_approval = tool_approval_store.peek(tool_approval_id)
+                pending_tool_approval = tool_approval_store.peek(tool_approval_id)
                 normalized_owner = str(owner or "").strip().casefold()
                 if (
-                    pending_approval is None
-                    or pending_approval.owner != normalized_owner
-                    or pending_approval.session_id != str(session)
+                    pending_tool_approval is None
+                    or pending_tool_approval.owner != normalized_owner
+                    or pending_tool_approval.session_id != str(session)
                 ):
                     raise HTTPException(
                         409,
@@ -1096,29 +1097,29 @@ def setup_chat_routes(
                     )
                 if decision == "approve":
                     message = (
-                        f"Approved the exact {pending_approval.tool_name} action "
+                        f"Approved the exact {pending_tool_approval.tool_name} action "
                         "shown above once."
                     )
                     # The sealed server record, not mutable composer state,
                     # restores the original action workspace.
-                    workspace = pending_approval.workspace or None
+                    workspace = pending_tool_approval.workspace or None
                     workspace_rejected = None
-                    if pending_approval.document_id:
-                        active_doc_id = pending_approval.document_id
+                    if pending_tool_approval.document_id:
+                        active_doc_id = pending_tool_approval.document_id
                     # The approval click is the per-turn opt-in for this exact
                     # sealed action. Restore only the coarse request toggle
                     # that would otherwise disable it because the synthetic
                     # "Approved…" message no longer resembles the original
                     # shell/web request. Current privilege, global-disable,
                     # incognito, compare, and tool-policy gates still run.
-                    if pending_approval.tool_name == "bash":
+                    if pending_tool_approval.tool_name == "bash":
                         allow_bash = "true"
-                    if pending_approval.tool_name in WEB_TOOL_NAMES:
+                    if pending_tool_approval.tool_name in WEB_TOOL_NAMES:
                         allow_web_search = "true"
                         _search_enabled = True
                 else:
                     message = (
-                        f"Denied the {pending_approval.tool_name} action shown above."
+                        f"Denied the {pending_tool_approval.tool_name} action shown above."
                     )
                 chat_mode = "agent"
             _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
@@ -2215,6 +2216,11 @@ def setup_chat_routes(
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
                         defer_context_shaping=_foreground_policy.enabled,
+                        external_untrusted_context_seen=bool(
+                            tool_approval_continuation
+                            and pending_tool_approval
+                            and pending_tool_approval.external_untrusted_context_seen
+                        ),
                         exact_approval=exact_tool_approval,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):

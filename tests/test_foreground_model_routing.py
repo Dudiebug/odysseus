@@ -158,6 +158,8 @@ def _chat_stream_endpoint(
             "primary": (endpoint_url, model, kwargs.get("headers")),
             "fallbacks": kwargs.get("fallbacks"),
         }
+        if kwargs.get("external_untrusted_context_seen"):
+            captured["agent_external_untrusted_context_seen"] = True
         if kwargs.get("exact_approval") is not None:
             captured["exact_approval"] = kwargs["exact_approval"]
             captured["approval_disabled_tools"] = set(
@@ -339,6 +341,39 @@ async def test_chat_stream_approval_restores_exact_shell_turn_toggle(monkeypatch
 
     assert captured["exact_approval"].pending == pending
     assert "bash" not in captured["approval_disabled_tools"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_denial_keeps_originating_run_tainted(monkeypatch):
+    from src.tool_capabilities import capabilities_for_action
+
+    captured = {}
+    endpoint = _chat_stream_endpoint(monkeypatch, "agent", captured)
+    pending = chat_routes.tool_approval_store.create(
+        owner="alice",
+        session_id="session-1",
+        origin_run_id="run-1",
+        tool_name="bash",
+        content="printf retry",
+        workspace=None,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action("bash", "printf retry"),
+    )
+    request = _RouteRequest("agent")
+    request._form.update(
+        {
+            "tool_approval_id": pending.approval_id,
+            "tool_approval_decision": "deny",
+        }
+    )
+
+    response = await endpoint(request)
+    async for _ in response.body_iterator:
+        pass
+
+    assert "exact_approval" not in captured
+    assert captured["agent_external_untrusted_context_seen"] is True
+    assert chat_routes.tool_approval_store.peek(pending.approval_id) is None
 
 
 @pytest.mark.asyncio
@@ -2171,6 +2206,7 @@ def test_multi_round_agent_uses_only_selected_model(monkeypatch):
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     async def fake_stream(candidates, messages, **kwargs):
         nonlocal round_number
         round_number += 1
@@ -2396,6 +2432,7 @@ def test_agent_terminal_later_round_error_stops_after_completed_tool(
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(
         agent_loop,
         "_agent_route_tool_mode",

@@ -622,6 +622,7 @@ async def run_teacher_inline(
     from src.agent_loop import stream_agent_loop
     captured_tool_events: List[Dict[str, Any]] = []
     captured_text_parts: List[str] = []
+    captured_metrics: Dict[str, Any] = {}
 
     async for evt_str in stream_agent_loop(
         endpoint_url=teacher_url,
@@ -649,6 +650,11 @@ async def run_teacher_inline(
             if isinstance(payload, dict):
                 payload["teacher"] = True
                 typ = payload.get("type")
+                if typ == "metrics" and isinstance(payload.get("data"), dict):
+                    # The outer chat route persists only the last metrics
+                    # payload. Keep a copy so any approval produced after the
+                    # recursive teacher run's metrics remains reloadable.
+                    captured_metrics = dict(payload["data"])
                 if typ == "tool_output":
                     captured_tool_event = {
                         "tool": payload.get("tool"),
@@ -750,6 +756,27 @@ async def run_teacher_inline(
             "the complete skill definition before it is saved."
         ),
     )
+    persisted_metrics = dict(captured_metrics)
+    persisted_tool_events = list(persisted_metrics.get("tool_events") or [])
+    persisted_round_texts = list(persisted_metrics.get("round_texts") or [])
+    prior_rounds = [
+        event.get("round")
+        for event in persisted_tool_events
+        if isinstance(event, dict) and isinstance(event.get("round"), int)
+    ]
+    approval_round = max([len(persisted_round_texts), *prior_rounds, 0]) + 1
+    approval_tool_event = {
+        "round": approval_round,
+        "model": teacher_model,
+        "tool": "manage_skills",
+        "command": str(skill.get("name") or "teacher-generated skill"),
+        "output": "Waiting for an exact user approval.",
+        "exit_code": None,
+        "ask_user": approval,
+    }
+    persisted_tool_events.append(approval_tool_event)
+    persisted_metrics["tool_events"] = persisted_tool_events
+    persisted_metrics.setdefault("model", teacher_model)
     yield (
         "data: "
         + json.dumps({"delta": "Review the teacher-generated skill before saving it."})
@@ -759,11 +786,7 @@ async def run_teacher_inline(
         "data: "
         + json.dumps({
             "type": "tool_output",
-            "tool": "manage_skills",
-            "command": str(skill.get("name") or "teacher-generated skill"),
-            "output": "Waiting for an exact user approval.",
-            "exit_code": None,
-            "ask_user": approval,
+            **approval_tool_event,
             "teacher": True,
         })
         + "\n\n"
@@ -771,5 +794,13 @@ async def run_teacher_inline(
     yield (
         "data: "
         + json.dumps({"type": "ask_user", "data": approval, "teacher": True})
+        + "\n\n"
+    )
+    # This must be the final metrics event: chat_routes saves only last_metrics
+    # when the outer stream reaches [DONE]. Without it, the live approval card
+    # disappears after a reload even though the server grant remains pending.
+    yield (
+        "data: "
+        + json.dumps({"type": "metrics", "data": persisted_metrics, "teacher": True})
         + "\n\n"
     )
