@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260815toolapproval1';
+import chatRenderer from './chatRenderer.js?v=20260815toolapproval2';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -61,6 +61,24 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
   let _contextHeaderBound = false;
   let _pendingToolApproval = null;
 
+  function _submitToolApprovalWhenIdle(approvalId, label) {
+    if (
+      !_pendingToolApproval
+      || _pendingToolApproval.approval_id !== approvalId
+    ) return;
+    if (isStreaming || _sendInFlight) {
+      setTimeout(() => _submitToolApprovalWhenIdle(approvalId, label), 120);
+      return;
+    }
+    const input = document.getElementById('message');
+    if (input) {
+      input.value = label;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    const sendButton = document.querySelector('.send-btn');
+    if (sendButton) sendButton.click();
+  }
+
   document.addEventListener('odysseus:tool-approval', (event) => {
     const detail = event && event.detail ? event.detail : {};
     const decision = String(detail.decision || '').toLowerCase();
@@ -69,12 +87,10 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
       approval_id: String(detail.approval_id),
       decision,
     };
-    const input = document.getElementById('message');
-    if (input) {
-      input.value = detail.label || (decision === 'approve' ? 'Allow once' : 'Deny');
-    }
-    const sendButton = document.querySelector('.send-btn');
-    if (sendButton) sendButton.click();
+    _submitToolApprovalWhenIdle(
+      _pendingToolApproval.approval_id,
+      detail.label || (decision === 'approve' ? 'Allow once' : 'Deny'),
+    );
   });
 
   function _fmtContextNumber(n) {

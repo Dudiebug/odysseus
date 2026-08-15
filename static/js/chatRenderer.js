@@ -2532,9 +2532,12 @@ export function addMessage(role, content, modelName, metadata) {
       const toolRounds = Object.keys(toolsByRound).map(Number);
       const maxRound = Math.max(toolRounds.length ? Math.max(...toolRounds) : 0, roundTexts.length);
 
-      for (let r = 0; r < maxRound; r++) {
-        const roundNum = r + 1;
-        const txt = resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata);
+      const firstRound = (toolsByRound[0] || []).length ? 0 : 1;
+      for (let roundNum = firstRound; roundNum <= maxRound; roundNum++) {
+        const r = roundNum - 1;
+        const txt = r >= 0
+          ? resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata)
+          : '';
 
         if (txt) {
           const wrap = document.createElement('div');

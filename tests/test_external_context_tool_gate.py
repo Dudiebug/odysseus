@@ -854,6 +854,7 @@ def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
     root = Path(__file__).parents[1]
     chat = (root / "static/js/chat.js").read_text()
     renderer = (root / "static/js/chatRenderer.js").read_text()
+    index = (root / "static/index.html").read_text()
 
     assert "fd.append('tool_approval_id'" in chat
     assert "fd.append('tool_approval_decision'" in chat
@@ -861,6 +862,12 @@ def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
     assert "aq.kind === 'tool_approval'" in renderer
     assert "aq.action.content" in renderer
     assert "decision: String((opt && opt.value)" in renderer
+    assert "if (isStreaming || _sendInFlight)" in chat
+    assert "_submitToolApprovalWhenIdle" in chat
+    assert "input.dispatchEvent(new Event('input'" in chat
+    assert "const firstRound = (toolsByRound[0] || []).length ? 0 : 1" in renderer
+    assert index.count("app.js?v=20260815toolapproval2") == 2
+    assert "app.js?v=20260808startupshell1" not in index
 
 
 def test_frontend_raw_fences_do_not_call_document_mutators():
