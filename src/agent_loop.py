@@ -5521,6 +5521,15 @@ async def stream_agent_loop(
                         except (json.JSONDecodeError, Exception):
                             pass
 
+            # Only a successful, authorized document execution may affect the
+            # editor.  Start the authorized stream before any completed-document
+            # event: handleDocUpdate finalizes that stream, while sending a
+            # doc_update first can enter diff mode and make the later stream
+            # discard/save the stale pre-update document.
+            if tool_result_is_successful(result):
+                for doc_event in _document_stream_events(block):
+                    yield f'data: {json.dumps(doc_event)}\n\n'
+
             # Emit doc-specific event for document tools — the frontend
             # document panel handles this; no need to show content in chat.
             if is_doc_tool and "action" in result:
@@ -5758,13 +5767,6 @@ async def stream_agent_loop(
                 yield (
                     f'data: {json.dumps({"type": "ask_user", "data": _pending_ask_user_event})}\n\n'
                 )
-
-            # Only a successful, authorized document execution may affect the
-            # editor.  Model deltas and raw fences are proposals and can be
-            # invalidated by an earlier result in the same tool batch.
-            if tool_result_is_successful(result):
-                for doc_event in _document_stream_events(block):
-                    yield f'data: {json.dumps(doc_event)}\n\n'
 
             # Native document tools open in the editor + carry the REAL doc id.
             # Emit a doc_update so the frontend opens/activates it and sends it

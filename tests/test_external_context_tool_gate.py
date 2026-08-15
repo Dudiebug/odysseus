@@ -745,3 +745,54 @@ def test_document_stream_events_are_derived_from_authorized_block():
         {"type": "doc_stream_open", "title": "Title", "language": "markdown"},
         {"type": "doc_stream_delta", "content": "Body"},
     ]
+
+
+def test_authorized_document_stream_precedes_completed_update(monkeypatch):
+    import src.agent_loop as agent_loop
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
+
+    async def fake_stream(*args, **kwargs):
+        yield "data: " + json.dumps(
+            {"delta": "```update_document\nNew body\n```"}
+        ) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def fake_execute(block, *args, **kwargs):
+        assert block.tool_type == "update_document"
+        return (
+            block.tool_type,
+            {
+                "action": "update",
+                "doc_id": "doc-1",
+                "title": "Existing",
+                "language": "markdown",
+                "content": "New body",
+                "version": 2,
+            },
+        )
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
+
+    events = _collect_agent_events(
+        agent_loop.stream_agent_loop(
+            "http://local.test/v1",
+            "small-local-model",
+            [{"role": "user", "content": "update the active document"}],
+            max_rounds=1,
+            relevant_tools={"update_document"},
+        )
+    )
+    event_types = [event.get("type") for event in events]
+
+    assert event_types.index("doc_stream_open") < event_types.index("doc_update")
+    assert event_types.index("doc_stream_delta") < event_types.index("doc_update")
+    assert event_types.index("doc_update") < event_types.index("tool_output")
