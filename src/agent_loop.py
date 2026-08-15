@@ -1144,7 +1144,6 @@ def _uploaded_files_context_message(uploaded_files: Optional[List[Dict]]) -> Opt
     return untrusted_context_message(
         "current chat uploaded files",
         "\n".join(lines),
-        arm_tool_gate=False,
     )
 
 
@@ -1600,7 +1599,6 @@ def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
             "preferences, or anything about \"me\" or \"my\":\n"
             + "\n".join(f"- {fact}" for fact in facts)
         ),
-        arm_tool_gate=False,
     )
 
 
@@ -1709,7 +1707,6 @@ def _minimal_recent_notes_tool_context_message(messages: List[Dict]) -> Optional
             + recent_text
             + "\n\n".join(parts)
         ),
-        arm_tool_gate=False,
     )
 
 
@@ -1829,7 +1826,6 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
                 f"{content_note}"
                 f"{content_for_prompt}"
             ),
-            arm_tool_gate=False,
         )
         active_document_message["_agent_injected"] = "context"
         out.append(active_document_message)
@@ -2433,7 +2429,6 @@ def _build_system_prompt(
         _doc_message = untrusted_context_message(
             "active editor document",
             doc_ctx,
-            arm_tool_gate=False,
         )
         _doc_message["_protected"] = True
 
@@ -2517,7 +2512,6 @@ def _build_system_prompt(
         _email_message = untrusted_context_message(
             "active email reader",
             email_ctx,
-            arm_tool_gate=False,
         )
         _email_message["_protected"] = True
 
@@ -2583,7 +2577,6 @@ def _build_system_prompt(
                 _email_style_message = untrusted_context_message(
                     "email writing style",
                     "EMAIL WRITING STYLE AND IDENTITY — FOLLOW FOR ANY EMAIL DRAFT OR SEND:\n" + _style,
-                    arm_tool_gate=False,
                 )
         except Exception:
             pass
@@ -2718,7 +2711,6 @@ def _build_system_prompt(
                     _skills_message = untrusted_context_message(
                         "skills",
                         _skills_text,
-                        arm_tool_gate=False,
                     )
                 else:
                     _skills_message = None
@@ -2734,7 +2726,6 @@ def _build_system_prompt(
                 _integ_message = untrusted_context_message(
                     "integrations",
                     _integ_prompt,
-                    arm_tool_gate=False,
                 )
         except Exception as _integ_err:
             logger.debug(f"Integration prompt injection skipped: {_integ_err}")
@@ -2747,7 +2738,6 @@ def _build_system_prompt(
                 _mcp_desc_message = untrusted_context_message(
                     "MCP tools",
                     _mcp_desc,
-                    arm_tool_gate=False,
                 )
         except Exception as _mcp_err:
             logger.debug(f"MCP description injection skipped: {_mcp_err}")

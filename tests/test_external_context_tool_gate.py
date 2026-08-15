@@ -277,7 +277,7 @@ def test_native_untrusted_tool_result_keeps_cross_turn_provenance():
     assert messages_contain_external_untrusted_context(messages) is True
 
 
-def test_minimal_document_prompt_stays_untrusted_without_prearming_gate():
+def test_minimal_document_prompt_arms_gate_for_untrusted_content():
     from types import SimpleNamespace
 
     from src.agent_loop import _minimal_odysseus_doc_messages
@@ -289,9 +289,11 @@ def test_minimal_document_prompt_stays_untrusted_without_prearming_gate():
 
     active_document = messages[-2]
     assert active_document["metadata"]["trusted"] is False
-    assert active_document["metadata"]["tool_gate_untrusted"] is False
-    assert messages_contain_external_untrusted_context(messages) is False
-    assert ToolRunSecurityContext().decision_for("update_document", "replacement").allowed
+    assert active_document["metadata"]["tool_gate_untrusted"] is True
+    assert messages_contain_external_untrusted_context(messages) is True
+    context = ToolRunSecurityContext()
+    context.observe_messages(messages)
+    assert context.decision_for("update_document", "replacement").allowed is False
 
 
 def test_explicit_gate_opt_out_overrides_legacy_external_source_label():
