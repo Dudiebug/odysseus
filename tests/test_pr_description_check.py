@@ -169,6 +169,20 @@ def test_ui_checkbox_without_media_still_needs_visual_evidence():
     assert not any(call["method"] == "setFailed" for call in calls)
 
 
+def test_ticked_screenshot_box_counts_without_the_template_bolding():
+    body = _body(
+        app_ran=True,
+        screenshot=True,
+        media="https://github.com/user-attachments/assets/example",
+    ).replace("**Screenshot or short clip**", "Screenshot or short clip")
+
+    calls = _run_checker(["static/js/example.js"], body)
+
+    assert _added_labels(calls) == {"ready for review"}
+    assert not _comment(calls)
+    assert not any(call["method"] == "setFailed" for call in calls)
+
+
 def test_explicit_not_run_is_honest_but_not_ready():
     calls = _run_checker(
         ["services/example.py"],

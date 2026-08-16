@@ -96,7 +96,11 @@ module.exports = async ({ github, context, core }) => {
 
   const appRan = /- \[x\]\s+I actually ran the app\b/i.test(body);
   const appNotRun = /- \[x\]\s+I did not run the app\/runtime validation\b/i.test(body);
-  const screenshotChecked = /- \[x\]\s+\*\*Screenshot or short clip\*\*/i.test(body);
+  // Anchor on the wording, not the template's emphasis: a ticked box the author
+  // retyped without the surrounding ** renders identically on the PR page, so
+  // treating it as unchecked is invisible from their side. Matches the two
+  // attestations above, which already ignore formatting.
+  const screenshotChecked = /- \[x\]\s+[*_]{0,2}Screenshot or short clip[*_]{0,2}/i.test(body);
   const screenshotSection = section('Screenshots / clips');
   const hasVisualEvidence = /!\[[^\]]*\]\([^)]+\)|<(?:img|video|source)\b[^>]*(?:src|href)=|https?:\/\/[^\s)]+/i.test(screenshotSection);
   const evidenceGaps = [];
