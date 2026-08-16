@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v377-lazy-image-editor';
+const CACHE_NAME = 'odysseus-v378-shared-config-image-editor';
 
 // Two lists, two jobs — they are no longer the same set and must not be
 // "resynced" back into one:
@@ -28,6 +28,7 @@ const PRECACHE = [
   '/static/style.css',
   '/static/app.js',
   '/static/js/storage.js',
+  '/static/js/appConfig.js',
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
