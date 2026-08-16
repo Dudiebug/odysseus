@@ -1027,9 +1027,13 @@ def test_session_html_export_escapes_name():
 def test_mcp_oauth_page_escapes_reflected_values():
     src = Path(__file__).resolve().parents[1] / "routes" / "mcp" / "mcp_routes.py"
     text = src.read_text()
-    body = text.split("def _oauth_authorize_page(", 1)[1].split("return f", 1)[0]
-    for var in ("auth_url", "server_id", "host", "redirect_uri"):
+    page = text.split("def _oauth_authorize_page(", 1)[1].split("def _oauth_result_page", 1)[0]
+    body = page.split("return f", 1)[0]
+    for var in ("auth_url", "server_id", "redirect_uri"):
         assert f"{var} = html.escape({var}" in body, var
+    # The Host header is no longer reflected at all: the paste-back form posts to
+    # a relative action, so there is nothing to escape and nothing to smuggle.
+    assert "{host}" not in page
 
 
 def _import_mcp_routes():
