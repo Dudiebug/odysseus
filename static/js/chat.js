@@ -35,6 +35,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { loadPanel } from './panels.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -6606,7 +6607,7 @@ import { createTerminalStreamError, isRecoverableStreamError } from './chatStrea
     // Images → Gallery editor.
     if (isImage) {
       try {
-        const gx = await import('./galleryEditor.js');
+        const gx = await loadPanel('editor');
         if (gx.openEditor) { gx.openEditor(url, id, null, name); return; }
       } catch (e) { console.warn('gallery open failed', e); }
       window.open(url, '_blank');

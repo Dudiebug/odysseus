@@ -9,6 +9,7 @@ import { providerLogo, providerLabel } from './providers.js';
 import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
@@ -1548,7 +1549,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     try {
       const [galleryMod, editorMod] = await Promise.all([
         import('./gallery.js'),
-        import('./galleryEditor.js'),
+        loadPanel('editor'),
       ]);
       // Ensure the Gallery modal is open so the editor has a container
       // to render into; switch its tabs to the Edit tab.
